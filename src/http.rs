@@ -45,7 +45,7 @@ impl ServiceFactory{
         ServiceFactory {
             proto:
                 MainService{
-                    file: FileServer::new(file_threads, Path::new("./client/"), invalidated_rx),
+                    file: FileServer::new(file_threads, Path::new("client/"), invalidated_rx),
                     //wss_factory: websocket::ServerFactory::default()
                 }
         }

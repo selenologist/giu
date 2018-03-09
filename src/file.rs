@@ -201,7 +201,16 @@ impl FileServerInternal{
         );
        
         // strip parent dir ("..") from the relative path before adding to base
-        self.root.join(
+        let root = {
+            if self.root.is_relative(){
+                ::std::env::current_dir().unwrap()
+                                         .join(self.root.clone())
+            }
+            else{
+                self.root.clone()
+            }
+        };
+        root.join(
             without_percent.components().fold(PathBuf::new(),
             |mut out, c|
             match c{

@@ -22,8 +22,8 @@ extern crate serde_derive;
 extern crate lazy_static;
 
 macro_rules! debug {
-    ($fmt:expr)              => { eprintln!(concat!("[{}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown")) };
-    ($fmt:expr, $($arg:tt)*) => { eprintln!(concat!("[{}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown"), $($arg)*) }
+    ($fmt:expr)              => { eprintln!(concat!("[{:^15}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown")) };
+    ($fmt:expr, $($arg:tt)*) => { eprintln!(concat!("[{:^15}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown"), $($arg)*) }
 }
 
 mod rebuilder;
