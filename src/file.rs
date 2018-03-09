@@ -21,6 +21,7 @@ use std::vec::Vec;
 use std::cell::{RefCell, Cell};
 use std::ops::Deref;
 use std::rc::Rc;
+use std::net::SocketAddr;
 
 use rebuilder::InvalidatedReceiver;
 
@@ -68,6 +69,7 @@ impl FileCache{
         }
     }
     pub fn insert(&self, key: String, value: Rc<InMemoryFile>){
+        debug!("storing {} in cache", key);
         self.0.borrow_mut().0.insert(key, value);
     }
 }
@@ -114,7 +116,6 @@ impl FileServerThreadState{
 
             current_thread::spawn(task);
         });
-        debug!("exiting");
     }
 }
 
@@ -204,7 +205,7 @@ impl FileServerInternal{
         let root = {
             if self.root.is_relative(){
                 ::std::env::current_dir().unwrap()
-                                         .join(self.root.clone())
+                                         .join(self.root.as_path())
             }
             else{
                 self.root.clone()
@@ -236,8 +237,12 @@ impl Service for FileServer{
 
     fn call(&self, req: Request) -> Self::Future {
         use hyper::{Method, StatusCode, Body, header};
-        let method = req.method().clone();
-        let uri    = req.uri();
+        use std::str::FromStr;
+
+        let method  = req.method().clone();
+        let uri     = req.uri();
+        let reqpath = String::from(req.path());
+        let reqaddr = format!("{}", req.remote_addr().unwrap_or(SocketAddr::from_str(&"0.0.0.0:0").unwrap()));
         if (method != Method::Head &&
             method != Method::Get) ||
             uri.is_absolute()
@@ -250,7 +255,7 @@ impl Service for FileServer{
 
         let fetch = 
             if let Some(cached) = self.cache.get(&path_string) {
-                debug!("cache hit for {}", path_string);
+                debug!("[{:>20}] - 200 cache - {}", reqaddr, path_string);
                 Either::A(future::ok(cached.clone()))
             }
             else{ 
@@ -274,8 +279,11 @@ impl Service for FileServer{
                 Either::B(
                     path_out.send(path)
                     .map_err(|_| panic!())
-                    .and_then({let ps = path_string.clone(); move |_|{
-                        debug!("awaiting IO thread response for {}", ps);
+                    .and_then({
+                            let ps   = path_string.clone();
+                            let addr = reqaddr.clone();
+                            move |_|{
+                        debug!("[{:>20}] - awaiting IO thread response for {}", addr, ps);
                         file_in.into_future()
                     }})
                     .map_err(|_| panic!())
@@ -284,10 +292,10 @@ impl Service for FileServer{
                         let cf: ChannelFile = to_cache.expect("Io thread failure");
                         let imf: Rc<InMemoryFile> = match cf{
                             Ok(k) => Rc::new(k),
-                            Err(e) => {return Err(e)}
+                            Err(e) => {return Err((e, path_string, reqpath, reqaddr))}
                         };
-                        debug!("storing {} in cache", path_string);
-                        self2.cache.insert(path_string.clone(), imf.clone());
+                        debug!("[{:>20}] - 200 fresh - {}", reqaddr, path_string);
+                        self2.cache.insert(path_string, imf.clone());
                         Ok(imf)
                     }))
             };
@@ -300,15 +308,35 @@ impl Service for FileServer{
             let mut res = Response::new()
                 .with_header(header::ContentLength(size))
                 .with_header(header::LastModified(modified));
-
+            
             if method == Method::Get {
                 res.set_body(Body::from(file));
             }
             Ok(res)
         }).or_else(|e| {
-                debug!("Error: {:?}", e);
-                Ok(Response::new().with_status(StatusCode::BadRequest))
-            })
+            use std::io::ErrorKind::*;
+            let (k, path, reqpath, reqaddr) = e;
+            match k.kind(){
+                PermissionDenied => {
+                    debug!("[{:>20}] - 403 - {}", reqaddr, path);
+                    Ok(Response::new()
+                       .with_status(StatusCode::Forbidden)
+                       .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
+                },
+                NotFound => {
+                    debug!("[{:>20}] - 404 - {}", reqaddr, path);
+                    Ok(Response::new()
+                       .with_status(StatusCode::NotFound)
+                       .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
+                },
+                _ => {
+                    debug!("[{:>20}] - Error: {:?}", reqaddr, k);
+                    Ok(Response::new()
+                       .with_status(StatusCode::InternalServerError)
+                       .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>",k))))
+                }
+            }
+        })
     }
 }
 

@@ -5,19 +5,18 @@ use std::sync::mpsc::{Sender, Receiver, channel};
 use std::time::Duration;
 use std::io;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::thread;
 use std::thread::{JoinHandle};
 
 pub type InvalidatedPath = String;
 pub type InvalidatedReceiver = Receiver<InvalidatedPath>;
 
-fn process_coffee(path: &PathBuf) -> io::Result<()>{
+fn process_coffee(path: &Path) -> io::Result<()>{
     debug!("Compiling {}", path.to_str().unwrap());
     let exit_status = match
         Exec::cmd("coffee")
         .arg("-c")
-        .arg("-M")
         .arg(path)
         .join(){
             Ok(k) => k,
@@ -34,6 +33,19 @@ fn process_coffee(path: &PathBuf) -> io::Result<()>{
     }
 }
 
+fn check<P: AsRef<Path>>(path: P){
+    match path.as_ref().extension(){
+        Some(ext) if ext == "coffee" => {
+            match process_coffee(path.as_ref()){
+                Ok(..) => {},
+                Err(e) => debug!("Failed to process: {:?}", e)
+            }
+        },
+        _ => {}
+    }
+}
+
+
 fn recursive_find(path: &Path) -> io::Result<()>{
     debug!("Entering {}", path.to_str().unwrap());
     for p in fs::read_dir(path)?{
@@ -44,9 +56,7 @@ fn recursive_find(path: &Path) -> io::Result<()>{
         }
         if e.file_type().unwrap().is_file(){
             let path = e.path();
-            if path.extension().unwrap() == "coffee"{
-               process_coffee(&path)?;
-            }
+            check(path)
         }
     }
     Ok(())
@@ -54,14 +64,7 @@ fn recursive_find(path: &Path) -> io::Result<()>{
 
 fn handle_event(event: DebouncedEvent, invalidation_tx: &Sender<InvalidatedPath>){
     use self::DebouncedEvent::*;
-    let check = |p:&PathBuf|
-        if p.extension().unwrap() == "coffee"{
-            match process_coffee(&p){
-                Ok(..) => {},
-                Err(e) => debug!("Failed to process: {:?}", e)
-            }
-        };
-
+    
     match event{
         Create(p) |
         Write(p)  => {
