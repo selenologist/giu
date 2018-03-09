@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use rmp_serde::{Deserializer, Serializer};
-use rmpv;
 
 use std::collections::BTreeMap;
 use std::cell::{Cell, RefCell,RefMut};

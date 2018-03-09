@@ -1,29 +1,42 @@
+#![feature(box_syntax)]
+
 extern crate notify;
 extern crate serde;
 extern crate rmp_serialize;
 extern crate rmp_serde;
 extern crate rmpv;
-#[macro_use]
-extern crate serde_derive;
 extern crate rmp_rpc;
-extern crate ws;
+//extern crate websocket as ws;
 extern crate hyper;
-extern crate hyper_staticfile;
 extern crate tokio_core;
+extern crate tokio;
+extern crate tokio_io;
 extern crate futures;
 extern crate subprocess;
+extern crate regex;
+
+#[macro_use]
+extern crate serde_derive;
+
+#[macro_use]
+extern crate lazy_static;
+
+macro_rules! debug {
+    ($fmt:expr)              => { eprintln!(concat!("[{}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown")) };
+    ($fmt:expr, $($arg:tt)*) => { eprintln!(concat!("[{}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown"), $($arg)*) }
+}
 
 mod rebuilder;
 mod graph;
-mod websocket;
+//mod websocket;
 mod http;
 mod noderpc;
+mod file;
 
 fn main(){
-    let rebuilder = rebuilder::launch_thread();
-    let websocket = websocket::launch_thread();
-    let http      = http::launch_thread();
-    rebuilder.join().unwrap();
-    websocket.join().unwrap();
+    let (rebuilder, invalidation_rx) = rebuilder::launch_thread();
+    let http      = http::launch_thread(invalidation_rx);
+    debug!("threads launched, waiting for join");
     http.join().unwrap();
+    rebuilder.join().unwrap();
 }
