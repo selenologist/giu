@@ -274,9 +274,11 @@ impl Service for FileServer{
                 let io = &self.threads[current_thread];
                 let path_out = io.path_out.clone();
                 let outer_file_in = io.file_in.clone();
-                let file_in = outer_file_in.replace(None).unwrap();
+                let file_in = outer_file_in.replace(None);
                 let self2 = self.clone(); 
                 Either::B(
+                if let Some(file_in) = file_in{
+                    Either::A(
                     path_out.send(path)
                     .map_err(|_| panic!())
                     .and_then({
@@ -298,6 +300,13 @@ impl Service for FileServer{
                         self2.cache.insert(path_string, imf.clone());
                         Ok(imf)
                     }))
+                }
+                else{
+                    Either::B(
+                        future::err((
+                            io::Error::new(io::ErrorKind::WouldBlock, "Thread is busy"), // XXX handle this properly (will do for now)
+                            path_string, reqpath, reqaddr)))
+                })
             };
         
         box fetch.and_then(move |imf: Rc<InMemoryFile>| {
