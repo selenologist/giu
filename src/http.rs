@@ -1,19 +1,12 @@
 use hyper::header::ContentLength;
 use hyper::server::{Http, Request, Response, Service, NewService};
 use hyper::Error;
-//use websocket::Websocket;
-//use ws::async::server::upgrade::IntoWs;
-//use ws::server::upgrade::HyperIntoWsError;
-use tokio::executor::current_thread;
-use tokio::net::{TcpListener};
-use futures::{Future, Stream, future};
+use futures::Future;
 
 use std::path::Path;
 use std::thread;
 use std::thread::{JoinHandle};
 use std::io;
-use std::rc::Rc;
-use std::sync::mpsc::Receiver;
 
 use rebuilder::InvalidatedReceiver;
 use file::FileServer;

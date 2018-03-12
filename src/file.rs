@@ -2,151 +2,24 @@
 
 use hyper::server::{Request, Response, Service};
 use hyper::Error;
-use futures::{Future, future, Sink, Stream};
-use futures::future::Either;
-use futures::sync::mpsc::channel as bounded_channel; // rename this because defaulting to bounded is dumb
-use futures::sync::mpsc::Sender as BoundedSender;
-use futures::sync::mpsc::Receiver as BoundedReceiver;
-use tokio::executor::current_thread;
+use futures::{Future, future};
 
-use std::collections::HashMap;
-use std::thread;
-use std::thread::{JoinHandle};
-use std::io;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::fs::File;
-use std::time::SystemTime;
-use std::vec::Vec;
-use std::cell::{RefCell, Cell};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::net::SocketAddr;
+use std::time::SystemTime;
 
 use rebuilder::InvalidatedReceiver;
+use filecache::FileCache;
+use filethread::FileThreadPool;
 
-type InMemoryFile = (SystemTime, Vec<u8>);
-type ChannelPath = PathBuf;
-type ChannelFile = io::Result<InMemoryFile>;
-
-#[derive(Clone)]
-pub struct FileCache(Rc<RefCell<(HashMap<String, Rc<InMemoryFile>>, InvalidatedReceiver)>>);
-
-impl FileCache{
-    pub fn new(invalidated_rx: InvalidatedReceiver) -> FileCache{
-        FileCache(Rc::new(RefCell::new((HashMap::new(), invalidated_rx))))
-    }
-
-    pub fn try_invalidate(&self){
-        use std::sync::mpsc::TryRecvError::Empty;
-        let mut b = self.0.borrow_mut();
-        loop{
-            match b.1.try_recv(){
-                Ok(s)  => {
-                    trace!("Removing invalidated file {} from cache", s);
-                    b.0.remove(&s); // we don't care if the key actually existed, so long as it's gone
-                },
-                Err(e) => {
-                    if e == Empty{
-                        break; // no more messages, just exit
-                    }
-                    else{
-                        panic!("Cache invalidation message receiver disconnected!");
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn get(&self, key: &String) -> Option<Rc<InMemoryFile>>{
-        self.try_invalidate();
-
-        if let Some(v) = self.0.borrow().0.get(key){
-            Some(v.clone())
-        }
-        else{
-            None
-        }
-    }
-    pub fn insert(&self, key: String, value: Rc<InMemoryFile>){
-        trace!("Storing {} in cache", key);
-        self.0.borrow_mut().0.insert(key, value);
-    }
-}
-
-struct FileServerThreadState{
-    path_in:  BoundedReceiver<ChannelPath>,
-    file_out: BoundedSender<ChannelFile>
-}
-
-struct FileServerThread{
-    pub path_out: BoundedSender<ChannelPath>,
-    pub file_in:  Rc<Cell<Option<BoundedReceiver<ChannelFile>>>>, // into_future() takes ownership but later returns. Swap the option in and out.
-    pub handle:   JoinHandle<()>
-}
-
-impl FileServerThreadState{
-    fn get_file(path: &Path) -> ChannelFile{
-        trace!("Fetching {}", path.to_str().unwrap());
-        let mut file = File::open(path)?;
-        let metadata = file.metadata()?;
-        let len      = metadata.len() as usize; // on 32bit systems we wouldn't be able to load >2^32 sized files anyway
-        let mod_date = metadata.modified()?;
-        let mut buf  = Vec::with_capacity(len); // XXX: this will explode on huge files
-        let read     = file.read_to_end(&mut buf)?;
-        assert!(read == len);
-        trace!("Read file {}", path.to_str().unwrap());
-
-        Ok((mod_date, buf))
-    }
-    pub fn run(self){
-        current_thread::run(move |_| {
-            let path_in  = self.path_in;
-            let file_out = self.file_out;
-            let task = path_in.for_each(
-                move |p| {
-                    current_thread::spawn(
-                        file_out.clone()
-                            .send(Self::get_file(&p))
-                            .map_err(|_| panic!())
-                            .map(|_| ()));
-                    Ok(())
-                }
-            );
-
-            current_thread::spawn(task);
-        });
-    }
-}
-
-impl FileServerThread{
-    pub fn new(thread_number: usize) -> FileServerThread{
-        // bounded_channel ensures that each thread has only one outstanding request at a time.
-        let (path_out, path_in) = bounded_channel(1);
-        let (file_out, file_in) = bounded_channel(1);
-        let handle = thread::Builder::new()
-            .name(format!("File IO {}", thread_number).into())
-            .spawn(move ||{
-            let state = FileServerThreadState{
-                path_in,
-                file_out
-            };
-            state.run();
-        }).unwrap();
-        
-        FileServerThread{
-            file_in: Rc::new(Cell::new(Some(file_in))),
-            path_out,
-            handle
-        }
-    }
-}
+pub type InMemoryFile = (SystemTime, Vec<u8>);
 
 pub struct FileServerInternal{
     root:           PathBuf,
     cache:          FileCache,
-    threads:        Vec<FileServerThread>,
-    next_thread:    Cell<usize>, // used for round-robin selection of file threads
+    file_threads:   FileThreadPool,
 }
 
 impl FileServerInternal{
@@ -251,65 +124,14 @@ impl Service for FileServer{
         }
         
         let path = self.decode_path(&req);
-        let path_string = String::from(path.to_str().unwrap());
 
-        let fetch = 
-            if let Some(cached) = self.cache.get(&path_string) {
-                info!("[{:>20}] - 200 cache - {}", reqaddr, path_string);
-                Either::A(future::ok(cached.clone()))
-            }
-            else{ 
-                // access the IO thread pool in a round-robin fashion
-                let current_thread = self.next_thread.get();
-                let next_thread = current_thread + 1;
-                if next_thread >= self.threads.len(){
-                    // if the next thread exceeds the number of threads, the next thread is zero
-                    self.next_thread.set(0);
-                }
-                else{
-                    // otherwise, it's next_thread
-                    self.next_thread.set(next_thread);
-                }
-
-                let io = &self.threads[current_thread];
-                let path_out = io.path_out.clone();
-                let outer_file_in = io.file_in.clone();
-                let file_in = outer_file_in.replace(None);
-                let self2 = self.clone(); 
-                Either::B(
-                if let Some(file_in) = file_in{
-                    Either::A(
-                    path_out.send(path)
-                    .map_err(|_| panic!())
-                    .and_then({
-                            let ps   = path_string.clone();
-                            let addr = reqaddr.clone();
-                            move |_|{
-                        trace!("[{:>20}] - awaiting IO thread response for {}", addr, ps);
-                        file_in.into_future()
-                    }})
-                    .map_err(|_| panic!())
-                    .and_then(move |(to_cache, file_in)| {
-                        outer_file_in.replace(Some(file_in));
-                        let cf: ChannelFile = to_cache.expect("Io thread failure");
-                        let imf: Rc<InMemoryFile> = match cf{
-                            Ok(k) => Rc::new(k),
-                            Err(e) => {return Err((e, path_string, reqpath, reqaddr))}
-                        };
-                        info!("[{:>20}] - 200 fresh - {}", reqaddr, path_string);
-                        self2.cache.insert(path_string, imf.clone());
-                        Ok(imf)
-                    }))
-                }
-                else{
-                    Either::B(
-                        future::err((
-                            io::Error::new(io::ErrorKind::WouldBlock, "Thread is busy"), // XXX handle this properly (will do for now)
-                            path_string, reqpath, reqaddr)))
-                })
-            };
+        let fetch =
+            self.file_threads
+                .fetch_with_cache(self.cache.clone(), path.clone());
         
-        box fetch.and_then(move |imf: Rc<InMemoryFile>| {
+        box fetch.and_then({
+                let reqaddr = reqaddr.clone();
+                move |imf: Rc<InMemoryFile>| {
             // ToDo: etag?
             let (mod_time, file) = (&imf.0, imf.1.clone());
             let size = file.len() as u64;
@@ -321,25 +143,26 @@ impl Service for FileServer{
             if method == Method::Get {
                 res.set_body(Body::from(file));
             }
+            info!("{:>20} - 200 - {}", reqaddr, path.display());
             Ok(res)
-        }).or_else(|e| {
+        }}).or_else(move |e| {
             use std::io::ErrorKind::*;
-            let (k, path, reqpath, reqaddr) = e;
+            let (path, k) = e;
             match k.kind(){
                 PermissionDenied => {
-                    error!("[{:>20}] - 403 - {}", reqaddr, path);
+                    error!("{:>20} - 403 - {}", reqaddr, path);
                     Ok(Response::new()
                        .with_status(StatusCode::Forbidden)
                        .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
                 },
                 NotFound => {
-                    error!("[{:>20}] - 404 - {}", reqaddr, path);
+                    error!("{:>20} - 404 - {}", reqaddr, path);
                     Ok(Response::new()
                        .with_status(StatusCode::NotFound)
                        .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
                 },
                 _ => {
-                    error!("[{:>20}] - Error: {:?}", reqaddr, k);
+                    error!("{:>20} - Error: {:?}", reqaddr, k);
                     Ok(Response::new()
                        .with_status(StatusCode::InternalServerError)
                        .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>",k))))
@@ -354,13 +177,11 @@ pub struct FileServer(Rc<FileServerInternal>);
 
 impl FileServer{
     pub fn new(threads: usize, base_path: &Path, invalidated_rx: InvalidatedReceiver) -> FileServer{
-        let threads = (0..threads).map(FileServerThread::new).collect();
         FileServer(Rc::new(
             FileServerInternal{
-                root:           base_path.into(),
-                cache:          FileCache::new(invalidated_rx),
-                next_thread:    Cell::new(0),
-                threads,
+                root:         base_path.into(),
+                cache:        FileCache::new(invalidated_rx),
+                file_threads: FileThreadPool::new(threads)
             }
         ))
     }

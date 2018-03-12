@@ -1,4 +1,5 @@
 #![feature(box_syntax)]
+#![feature(conservative_impl_trait)]
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;
@@ -24,16 +25,13 @@ extern crate lazy_static;
 extern crate log;
 extern crate env_logger;
 
-/*macro_rules! debug {
-    ($fmt:expr)              => { eprintln!(concat!("[{:^15}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown")) };
-    ($fmt:expr, $($arg:tt)*) => { eprintln!(concat!("[{:^15}] ", $fmt), ::std::thread::current().name().unwrap_or("unknown"), $($arg)*) }
-}*/
-
 mod rebuilder;
 mod graph;
 mod websocket;
 mod http;
 mod file;
+mod filecache;
+mod filethread;
 
 fn main(){
     // configure logger    
@@ -60,10 +58,13 @@ fn main(){
                 write!(buf, "{:>5}", level_style.value(level))
             };
             
-            let write_thread =
+            let write_thread = {
+                let mut style = buf.style();
+                style.set_color(Color::Magenta);
                 write!(buf,
-                       "[{:^9}]",
-                       std::thread::current().name().unwrap_or("unknown"));
+                       "[{:>12}!",
+                       style.value(std::thread::current().name().unwrap_or("unknown")))
+            };
 
             // if the path root is the main package's name, strip it
             let module_path = record.module_path().unwrap_or("unknown");
@@ -85,7 +86,7 @@ fn main(){
                     else{
                         (buf.style(), &module_path[..])
                     };
-                write!(buf, "{:>9}: ", style.value(path))
+                write!(buf, "{:<12}] ", style.value(path))
             };
 
             let write_args =

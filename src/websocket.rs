@@ -94,7 +94,7 @@ impl Handler for ServerHandler{
     fn on_open(&mut self, hs: Handshake) -> WsResult<()>{
         if let Some(ip_addr) = hs.peer_addr {
             let ip_string = format!("{}", ip_addr);
-            info!("[{:>20}] - connection established", ip_string);
+            info!("{:>20} - connection established", ip_string);
             self.addr = ip_string;
         }
         else{
