@@ -65,16 +65,14 @@ impl NewService for ServiceFactory{
 
 pub fn launch_thread(invalidated_rx: InvalidatedReceiver) -> JoinHandle<()>{
     thread::Builder::new()
-        .name("HTTP thread".into())
+        .name("HTTP".into())
         .spawn(move ||{
     let addr_string = "127.0.0.1:3000";
     let addr        = addr_string.parse().unwrap();
     let factory     = ServiceFactory::new(4, invalidated_rx);
     let server      = Http::new().bind(&addr, factory).unwrap();
 
-    let protocol_name = "selenologist-node-editor";
-
-    debug!("Starting server on http://{}", addr_string);
+    info!("Starting server on http://{}", addr_string);
     server.run().unwrap();
     }).unwrap()
 }

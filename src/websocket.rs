@@ -1,19 +1,14 @@
 use serde::{Deserialize, Serialize};
 use rmp_serde;
 use rmp_serde::{Deserializer, Serializer};
-use ws::OwnedMessage;
-use ws::codec::ws::MessageCodec;
-use ws::client::async::{ClientNew, Client, Framed, TcpStream};
-use hyper::header::Headers; // XXX consider handling this in http.rs
+use ws::{listen, Handler, Factory, Sender, Handshake, Request, Response, Message, CloseCode};
+use ws::{Error as WsError, ErrorKind as WsErrorKind, Result as WsResult};
 use futures::future::{Future, IntoFuture};
 
-use graph::*;
+use graph::{Response as GraphResponse, *};
 
-use std::cell::RefCell;
 use std::thread;
-use std::thread::{Thread, JoinHandle};
-use std::io;
-use std::net::SocketAddr;
+use std::thread::{JoinHandle};
 
 #[derive(Copy,Clone)]
 struct ReadyClient{
@@ -21,21 +16,8 @@ struct ReadyClient{
 }
 
 impl ReadyClient{
-    fn decode_command(msg: Message) -> Result<Command, _>{
-        match msg{
-            Message::Text(..) => Err(::ws::Error::new(::ws::ErrorKind::Protocol, String::from("Websocket protocol is msgpack therefore binary; Text received instead"))),
-            Message::Binary(b) => {
-                let res: Result<Command, _> = rmp_serde::decode::from_slice(&b[..]);
-                match res{
-                    Ok(k)  => Ok(k),
-                    Err(e) => Err(::ws::Error::new(::ws::ErrorKind::Protocol, format!("{:?}", e)))
-                }
-           }
-       }
-    }
-
     fn perform_command(&self, out: &Sender, store: &GraphStore,
-                       command: Command) -> Result<(), _> {
+                       command: Command) -> WsResult<()> {
         use graph::Command::*; 
         match command{
             AddLink((from_node, from_port), (to_node, to_port)) => {
@@ -49,12 +31,28 @@ impl ReadyClient{
         }
     }
 
+    fn decode_command(msg: Message) -> WsResult<Command>{
+        match msg{
+            Message::Text(..) =>
+                Err(WsError::new(
+                    WsErrorKind::Protocol,
+                    String::from("text received where binary msgpack expected"))),
+            Message::Binary(b) => {
+                let res: Result<Command, _> = rmp_serde::decode::from_slice(&b[..]);
+                match res{
+                    Ok(k)  => Ok(k),
+                    Err(e) => Err(WsError::new(WsErrorKind::Protocol, format!("{:?}", e)))
+                }
+           }
+       }
+    }
+
     fn process_command(&self, out: &Sender, store: &GraphStore, msg: Message)
-        -> Result<(), _>
+        -> WsResult<()>
     {
         match ReadyClient::decode_command(msg){
-            Ok(k)  => {self.perform_command(out, store, k);  Ok(())},
-            Err(e) => {debug!("decode_command failed: {:?}", e); Err(e)}
+            Ok(k)  => self.perform_command(out, store, k),
+            Err(e) => {error!("Decode_command failed: {:?}", e); Err(e)}
         }
     }
 }
@@ -86,14 +84,41 @@ impl GraphChoice{
 }
 
 struct ServerHandler{
+    out:   Sender,
     store: GraphStore,
-    state: ClientState
+    state: ClientState,
+    addr:  String
 }
 
-type Client  = Framed<TcpStream, MessageCodec<OwnedMessage>>;
+impl Handler for ServerHandler{
+    fn on_open(&mut self, hs: Handshake) -> WsResult<()>{
+        if let Some(ip_addr) = hs.peer_addr {
+            let ip_string = format!("{}", ip_addr);
+            info!("[{:>20}] - connection established", ip_string);
+            self.addr = ip_string;
+        }
+        else{
+            debug!("Connection without IP address?");
+        }
 
-impl ServerHandler{
-    fn on_message(mut self, handle: Handle, client: Client, msg: OwnedMessage) -> _ {
+
+        self.out.send(rmp_serde::encode::to_vec_named(
+            &GraphList::from_graphstore(&self.store))
+            .unwrap())?;
+
+        Ok(())
+    }
+
+    fn on_request(&mut self, req: &Request) -> WsResult<Response> {
+        let mut res = Response::from_request(req)?;
+
+        let protocol_name = "selenologist-node-editor";
+        res.set_protocol(protocol_name);
+
+        Ok(res)
+    }
+        
+    fn on_message(&mut self, msg: Message) -> WsResult<()> {
         use self::ClientState::*;
         match self.state.clone() {
             Ready(client) =>
@@ -108,56 +133,47 @@ impl ServerHandler{
                             Ok(())
                         }
                         else{
-                            self.out.close(CloseCode::Unsupported);
-                            Err("invalid graph ID"))
+                            self.out.close(CloseCode::Unsupported)?;
+                            Err(WsError::new(WsErrorKind::Protocol,
+                                             "invalid graph ID"))
                         }
                     },
                     Err(e) => {
-                        debug!("{:?}", e);
-                        self.out.close(CloseCode::Protocol);
-                        Err("expected graph choice, got something else"))
+                        error!("{:?}", e);
+                        self.out.close(CloseCode::Protocol)?;
+                        Err(WsError::new(WsErrorKind::Protocol,
+                                         "expected graph choice, got something else"))
                     }
                 }
         }
     }
-    fn main_loop(mut self, handle: Handle, client: Client) { 
-        handle.spawn(client.into_future().then({
-            let handle = handle.clone();
-            move |res|
-            match res {
-                Ok(m)  => self.on_message(handle, client, m),
-                Err(e) => panic!()
-            }
-        }));
-    }
 }
 
 #[derive(Default)]
-pub struct ServerFactory{
-    store: GraphStore
+struct ServerFactory{
+    store: GraphStore,    
 }
 
-impl ServerFactory{
-    pub fn new_connection(&self, handle: Handle, client: Client, headers: Headers) -> Result<()>{
-        let addr = client.get_ref().peer_addr().unwrap();
-        debug!("Connection from {} upgraded to WebSocket", addr);
-        let graph_list = OwnedMessage::Binary(rmp_serde::encode::to_vec_named(&GraphList::from_graphstore(&self.store)).unwrap());
-        let handler = ServerHandler{
+impl Factory for ServerFactory{
+    type Handler = ServerHandler;
+
+    fn connection_made(&mut self, out: Sender) -> Self::Handler{
+        ServerHandler{
+            out,
             store: self.store.clone(),
-            state: ClientState::AwaitingGraph
-        };
-
-        let main = client.send(graph_list).then({
-            let handle = handle.clone();
-            move |res|
-                match res{
-                    Ok(k)  => handler.main_loop(handle, client),
-                    Err(e) => panic!()
-                }
-            });
-
-        handle.spawn(main);
-
-        Ok(())
+            state: ClientState::AwaitingGraph,
+            addr:  "0.0.0.0:0".into()
+        }
     }
+}
+
+pub fn launch_thread() -> JoinHandle<()>{
+    thread::Builder::new()
+        .name("websocket".into())
+        .spawn(move || {
+        let mut factory = ServerFactory::default();
+        let listen_addr = "127.0.0.1:3001";
+        info!("Attempting to listen on {}", listen_addr);
+        listen(listen_addr, |out| factory.connection_made(out)).unwrap()
+    }).unwrap()
 }

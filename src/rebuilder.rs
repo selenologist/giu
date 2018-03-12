@@ -13,7 +13,7 @@ pub type InvalidatedPath = String;
 pub type InvalidatedReceiver = Receiver<InvalidatedPath>;
 
 fn process_coffee(path: &Path) -> io::Result<()>{
-    debug!("Compiling {}", path.to_str().unwrap());
+    info!("Compiling {}", path.to_str().unwrap());
     let exit_status = match
         Exec::cmd("coffee")
         .arg("-c")
@@ -24,11 +24,11 @@ fn process_coffee(path: &Path) -> io::Result<()>{
     };
 
     if exit_status != ExitStatus::Exited(0){
-        debug!("Error, returned {:?}", exit_status);
+        error!("Error, returned {:?}", exit_status);
         Err(io::Error::new(io::ErrorKind::Other, format!("exited with status {:?}", exit_status)))
     }
     else{
-        debug!("{} processed.", path.to_str().unwrap());
+        info!("{} processed.", path.to_str().unwrap());
         Ok(())
     }
 }
@@ -38,7 +38,7 @@ fn check<P: AsRef<Path>>(path: P){
         Some(ext) if ext == "coffee" => {
             match process_coffee(path.as_ref()){
                 Ok(..) => {},
-                Err(e) => debug!("Failed to process: {:?}", e)
+                Err(e) => error!("Failed to process: {:?}", e)
             }
         },
         _ => {}
@@ -47,10 +47,10 @@ fn check<P: AsRef<Path>>(path: P){
 
 
 fn recursive_find(path: &Path) -> io::Result<()>{
-    debug!("Entering {}", path.to_str().unwrap());
+    trace!("Entering {}", path.to_str().unwrap());
     for p in fs::read_dir(path)?{
         let e = p.unwrap();
-        debug!("Found file {:?}", e.file_name());
+        info!("Found file {:?}", e.file_name());
         if e.file_type().unwrap().is_dir(){
             recursive_find(&e.path())?;
         }
@@ -69,21 +69,21 @@ fn handle_event(event: DebouncedEvent, invalidation_tx: &Sender<InvalidatedPath>
         Create(p) |
         Write(p)  => {
             let s = String::from(p.to_str().unwrap());
-            debug!("File {} modified", s);
+            info!("File {} modified", s);
             check(&p);
             invalidation_tx.send(s).unwrap();
         },
         Rename(old, new) => {
             let s1 = String::from(old.to_str().unwrap());
             let s2 = String::from(new.to_str().unwrap());
-            debug!("File {} renamed to {}", s1, s2);
+            info!("File {} renamed to {}", s1, s2);
             invalidation_tx.send(s1).unwrap();
             check(&new);
             invalidation_tx.send(s2).unwrap();
         },
         Remove(p) => {
             let s = String::from(p.to_str().unwrap());
-            debug!("File {} removed", s);
+            info!("File {} removed", s);
             invalidation_tx.send(s).unwrap();
         }
         _ => ()
@@ -97,19 +97,19 @@ pub fn launch_thread() -> (JoinHandle<()>, InvalidatedReceiver){
         .name("rebuilder".into())
         .spawn(move ||{
         let watch_path = "client/";
-        debug!("Finding and processing existing .coffee files");
+        trace!("Finding and processing existing .coffee files");
         recursive_find(Path::new(watch_path)).unwrap();
 
         let (watcher_tx, watcher_rx) = channel();
 
-        let mut watcher = watcher(watcher_tx, Duration::from_secs(5)).unwrap();
+        let mut watcher = watcher(watcher_tx, Duration::from_secs(1)).unwrap();
 
         watcher.watch(watch_path, RecursiveMode::Recursive).unwrap();
 
         loop{
             match watcher_rx.recv(){
                 Ok(ev) => handle_event(ev, &invalidation_tx),
-                Err(e) => debug!("watch error: {:?}", e)
+                Err(e) => error!("watch error: {:?}", e)
             }
         }
     }).unwrap();

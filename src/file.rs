@@ -43,7 +43,7 @@ impl FileCache{
         loop{
             match b.1.try_recv(){
                 Ok(s)  => {
-                    debug!("Removing invalidated file {} from cache", s);
+                    trace!("Removing invalidated file {} from cache", s);
                     b.0.remove(&s); // we don't care if the key actually existed, so long as it's gone
                 },
                 Err(e) => {
@@ -69,7 +69,7 @@ impl FileCache{
         }
     }
     pub fn insert(&self, key: String, value: Rc<InMemoryFile>){
-        debug!("storing {} in cache", key);
+        trace!("Storing {} in cache", key);
         self.0.borrow_mut().0.insert(key, value);
     }
 }
@@ -87,7 +87,7 @@ struct FileServerThread{
 
 impl FileServerThreadState{
     fn get_file(path: &Path) -> ChannelFile{
-        debug!("fetching {}", path.to_str().unwrap());
+        trace!("Fetching {}", path.to_str().unwrap());
         let mut file = File::open(path)?;
         let metadata = file.metadata()?;
         let len      = metadata.len() as usize; // on 32bit systems we wouldn't be able to load >2^32 sized files anyway
@@ -95,7 +95,7 @@ impl FileServerThreadState{
         let mut buf  = Vec::with_capacity(len); // XXX: this will explode on huge files
         let read     = file.read_to_end(&mut buf)?;
         assert!(read == len);
-        debug!("read file {}", path.to_str().unwrap());
+        trace!("Read file {}", path.to_str().unwrap());
 
         Ok((mod_date, buf))
     }
@@ -125,7 +125,7 @@ impl FileServerThread{
         let (path_out, path_in) = bounded_channel(1);
         let (file_out, file_in) = bounded_channel(1);
         let handle = thread::Builder::new()
-            .name(format!("FileServer IO {}", thread_number).into())
+            .name(format!("File IO {}", thread_number).into())
             .spawn(move ||{
             let state = FileServerThreadState{
                 path_in,
@@ -156,7 +156,7 @@ impl FileServerInternal{
         use regex::{Regex, Replacer, Captures};
 
         lazy_static!{
-            static ref percent_re: Regex = Regex::new("%([0-9A-Fa-f]{2})").unwrap();
+            static ref PERCENT_RE: Regex = Regex::new("%([0-9A-Fa-f]{2})").unwrap();
         }
 
         struct PercentReplacer;
@@ -198,7 +198,7 @@ impl FileServerInternal{
         }
         
         let without_percent = PathBuf::from(String::from(
-            percent_re.replace_all(req.path(), PercentReplacer))
+            PERCENT_RE.replace_all(req.path(), PercentReplacer))
         );
        
         // strip parent dir ("..") from the relative path before adding to base
@@ -255,7 +255,7 @@ impl Service for FileServer{
 
         let fetch = 
             if let Some(cached) = self.cache.get(&path_string) {
-                debug!("[{:>20}] - 200 cache - {}", reqaddr, path_string);
+                info!("[{:>20}] - 200 cache - {}", reqaddr, path_string);
                 Either::A(future::ok(cached.clone()))
             }
             else{ 
@@ -285,7 +285,7 @@ impl Service for FileServer{
                             let ps   = path_string.clone();
                             let addr = reqaddr.clone();
                             move |_|{
-                        debug!("[{:>20}] - awaiting IO thread response for {}", addr, ps);
+                        trace!("[{:>20}] - awaiting IO thread response for {}", addr, ps);
                         file_in.into_future()
                     }})
                     .map_err(|_| panic!())
@@ -296,7 +296,7 @@ impl Service for FileServer{
                             Ok(k) => Rc::new(k),
                             Err(e) => {return Err((e, path_string, reqpath, reqaddr))}
                         };
-                        debug!("[{:>20}] - 200 fresh - {}", reqaddr, path_string);
+                        info!("[{:>20}] - 200 fresh - {}", reqaddr, path_string);
                         self2.cache.insert(path_string, imf.clone());
                         Ok(imf)
                     }))
@@ -327,19 +327,19 @@ impl Service for FileServer{
             let (k, path, reqpath, reqaddr) = e;
             match k.kind(){
                 PermissionDenied => {
-                    debug!("[{:>20}] - 403 - {}", reqaddr, path);
+                    error!("[{:>20}] - 403 - {}", reqaddr, path);
                     Ok(Response::new()
                        .with_status(StatusCode::Forbidden)
                        .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
                 },
                 NotFound => {
-                    debug!("[{:>20}] - 404 - {}", reqaddr, path);
+                    error!("[{:>20}] - 404 - {}", reqaddr, path);
                     Ok(Response::new()
                        .with_status(StatusCode::NotFound)
                        .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
                 },
                 _ => {
-                    debug!("[{:>20}] - Error: {:?}", reqaddr, k);
+                    error!("[{:>20}] - Error: {:?}", reqaddr, k);
                     Ok(Response::new()
                        .with_status(StatusCode::InternalServerError)
                        .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>",k))))
