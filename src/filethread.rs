@@ -12,7 +12,6 @@ use futures::future::Either;
 use futures::sync::mpsc::channel as bounded_channel; // rename this because defaulting to bounded is dumb
 use futures::sync::mpsc::Sender as BoundedSender;
 use futures::sync::mpsc::Receiver as BoundedReceiver;
-use tokio::executor::current_thread;
 
 use file::InMemoryFile;
 use filecache::FileCache;
@@ -47,22 +46,19 @@ impl FileThreadState{
         Ok((mod_date, buf))
     }
     pub fn run(self){
-        current_thread::run(move |_| {
-            let path_in  = self.path_in;
-            let file_out = self.file_out;
-            let task = path_in.for_each(
-                move |p| {
-                    current_thread::spawn(
-                        file_out.clone()
-                            .send(Self::get_file(&p))
-                            .map_err(|_| panic!())
-                            .map(|_| ()));
-                    Ok(())
-                }
-            );
+        let path_in  = self.path_in;
+        let file_out = self.file_out;
+        let task = path_in.for_each(
+            move |p| {
+                file_out.clone()
+                    .send(Self::get_file(&p))
+                    .wait()
+                    .unwrap();
+                Ok(())
+            }
+        );
 
-            current_thread::spawn(task);
-        });
+        task.wait().unwrap();
     }
 }
 

@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;
-extern crate rmp_serialize;
 extern crate rmp_serde;
 extern crate rmpv;
 extern crate ws;
@@ -14,6 +13,7 @@ extern crate tokio_io;
 extern crate futures;
 extern crate subprocess;
 extern crate regex;
+extern crate time;
 
 #[macro_use]
 extern crate serde_derive;
@@ -24,6 +24,22 @@ extern crate lazy_static;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+
+macro_rules! profile {
+    ($name:expr, $bl:block) => ({
+        use log::Level::Trace;
+        if log_enabled!(Trace){
+            let name   = $name;
+            let start  = time::PreciseTime::now();
+            let result = $bl;
+            trace!("{} took {:?}", name, start.to(time::PreciseTime::now()));
+            result
+        }
+        else{
+            $bl
+        }
+    })
+}
 
 mod rebuilder;
 mod graph;

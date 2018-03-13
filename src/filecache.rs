@@ -39,9 +39,11 @@ impl FileCache{
         self.try_invalidate();
 
         if let Some(v) = self.0.borrow().0.get(key){
+            trace!("Cache hit {}", key);
             Some(v.clone())
         }
         else{
+            trace!("Cache miss {}", key);
             None
         }
     }

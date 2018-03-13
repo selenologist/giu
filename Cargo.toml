@@ -5,9 +5,8 @@ authors = ["Selenologist <selenologist@users.noreply.github.com>"]
 
 [dependencies]
 notify           = "4.0.0"
-serde            = "1.0.27"
+serde            = {version = "1.0.27", features = ["rc"]}
 serde_derive     = "1.0"
-rmp-serialize    = "0.8"
 rmp-serde        = "0.13.7"
 rmpv             = "0.4.0"
 futures          = "0.1.18"
@@ -22,3 +21,4 @@ regex            = "0.2"
 ws               = "0.7.3"
 log              = "0.4.1"
 env_logger       = "0.5.5"
+time             = "0.1"

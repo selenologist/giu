@@ -7,6 +7,7 @@ use std::path::Path;
 use std::thread;
 use std::thread::{JoinHandle};
 use std::io;
+use time;
 
 use rebuilder::InvalidatedReceiver;
 use file::FileServer;
@@ -25,7 +26,7 @@ impl Service for MainService {
     type Future   = ResponseFuture;
 
     fn call(&self, req: Request) -> Self::Future {
-        self.file.call(req)
+        profile!(format!("{}", req.path()), {self.file.call(req)})
     }
 }
 
