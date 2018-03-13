@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use rmp_serde;
-use rmp_serde::{Deserializer, Serializer};
+//use rmp_serde;
+use serde_json;
 use ws::{listen, Handler, Factory, Sender, Handshake, Request, Response as WsResponse, Message, CloseCode};
 use ws::{Error as WsError, ErrorKind as WsErrorKind, Result as WsResult};
 use futures::future::{Future, IntoFuture};
@@ -21,6 +21,7 @@ fn to_ws_internal<D: Display>(thing: D) -> WsError{
     to_ws_err(thing, WsErrorKind::Internal)
 }
 
+/*
 fn decode_command(msg: Message) -> WsResult<Command>{
     use rmpv;
     use std::io::Read;
@@ -55,6 +56,41 @@ fn encode_response(response: Response) -> WsResult<Message>{
 fn encode_update<T: Into<Update>>(update: T) -> WsResult<Message>{
     match rmp_serde::encode::to_vec_named(&update.into()){
         Ok(v)  => Ok(Message::Binary(v)),
+        Err(e) => Err(WsError::new(WsErrorKind::Internal, format!("encode_update failed {:?}", e)))
+    }
+}
+*/
+
+fn decode_command(msg: Message) -> WsResult<Command>{
+    use serde_json::Value;
+    match msg{
+        Message::Text(t) => {
+            let res: Result<Command, _> = serde_json::from_str(&t[..]);
+            match res{
+                Ok(k)  => Ok(k),
+                Err(e) => Err(WsError::new(WsErrorKind::Protocol,
+                                           format!("decode_command failed {:?}, got val: {:?}",
+                                                   e, {
+                                                let v: Result<Value,_> = serde_json::from_str(&t[..]); v})))
+            }
+        },
+        Message::Binary(..) =>
+            Err(WsError::new(
+                    WsErrorKind::Protocol,
+                    format!("binary message received where expecting text JSON")))
+    }
+}
+
+fn encode_response(response: Response) -> WsResult<Message>{
+    match serde_json::to_string(&response){
+        Ok(s)  => Ok(Message::Text(s)),
+        Err(e) => Err(WsError::new(WsErrorKind::Internal, format!("encode_response failed {:?}", e)))
+    }
+}
+
+fn encode_update<T: Into<Update>>(update: T) -> WsResult<Message>{
+    match serde_json::to_string(&update.into()){
+        Ok(s)  => Ok(Message::Text(s)),
         Err(e) => Err(WsError::new(WsErrorKind::Internal, format!("encode_update failed {:?}", e)))
     }
 }
@@ -94,13 +130,13 @@ impl ClientCommon{
                   client_type: ClientType) -> WsResult<Option<Response>> {
         use graph::Command::*; 
         let response = match *command{
-            AddLink{ from: (ref from_node, ref from_port), to: (ref to_node, ref to_port) } => {
+            AddLink{ from: ref from, to: ref to } => {
                 let graph = store.get(graph).unwrap();
                 
-                let result = graph.add_link(&from_node, &from_port, &to_node, &to_port);
+                let result = graph.add_link(from, to);
                 match result{
                     Response::Ok => {
-                        graph.repeat_to(client_type.opposite(), encode_update(command.clone())?);
+                        graph.repeat_to(ClientType::Both, encode_update(command.clone())?);
                         Response::Ok
                     }
                     _ => result
@@ -210,7 +246,7 @@ impl Handler for ServerHandler{
             debug!("Connection without IP address?");
         }
 
-        self.out.send(rmp_serde::encode::to_vec_named(
+        self.out.send(serde_json::to_string(
             &self.store.list())
             .unwrap())?;
 
@@ -303,13 +339,12 @@ impl Factory for ServerFactory{
 
 pub fn launch_thread() -> JoinHandle<()>{
     use std::collections::BTreeMap;
-    use rmpv;
     let d = GraphData{
         nodes: {
             let mut map = BTreeMap::new();
-            map.insert("TestLabel".into(), Node::Label{id: "TestData".into()});
-            map.insert("InPortNode".into(), Node::InPort{id: "TestInPort".into()});
-            map.insert("OutPortNode".into(), Node::OutPort{id: "TestOutPort".into()});
+            map.insert("TestLabel".into(), Node::Label{data: "TestData".into()});
+            map.insert("InPortNode".into(), Node::InPort{port: "TestInPort".into()});
+            map.insert("OutPortNode".into(), Node::OutPort{port: "TestOutPort".into()});
             map
         },
         links: BTreeMap::new(),
@@ -320,11 +355,8 @@ pub fn launch_thread() -> JoinHandle<()>{
         }
     };
 
-    let v = rmp_serde::encode::to_vec_named(&d).unwrap();
-    let mut c = Cursor::new(v);
-    let r = rmpv::decode::read_value(&mut c);
-    println!("looks like {:?}", r);
-
+    let s = serde_json::to_string(&d).unwrap();
+    println!("looks like {}", s);
 
     thread::Builder::new()
         .name("websocket".into())

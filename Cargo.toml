@@ -6,9 +6,10 @@ authors = ["Selenologist <selenologist@users.noreply.github.com>"]
 [dependencies]
 notify           = "4.0.0"
 serde            = {version = "1.0.27", features = ["rc"]}
+serde_json       = "1.0.11"
 serde_derive     = "1.0"
-rmp-serde        = "0.13.7"
-rmpv             = "0.4.0"
+#rmp-serde        = "0.13.7"
+#rmpv             = "0.4.0"
 futures          = "0.1.18"
 hyper            = "0.11.22"
 subprocess       = "0.1.12"

@@ -1,24 +1,15 @@
-<style>
-#graph{
-    background-color: black;
-    color: white;
-    padding: 1em;
-    margin:  0.5em;
-}
-
-.Node{
-    background-color: blue;
-    color: white;
-    border: 2px solid grey;
-}
-</style>
-<script>
-var current_port = false;
-var port_click   = function(direction, id){
-    console.log("graph not loaded yet");
-}
-</script>
-
-<script src="require1k.min.js" data-main="./main"></script>
-<h1>It works!</h1>
-<div id="graph"></div>
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>NodeGraph Editor</title>
+        <link rel="stylesheet" href="index.css"></link>
+    </head>
+    <body>
+        <h1>It works!</h1>
+        <div id="graph"></div>
+        <div id="links-list"></div>
+    </body>
+    <script src="d3.v5.min.js"></script>
+    <script src="require1k.min.js" data-main="./main"></script>
+</html>

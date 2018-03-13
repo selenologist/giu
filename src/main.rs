@@ -3,8 +3,9 @@
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;
-extern crate rmp_serde;
-extern crate rmpv;
+extern crate serde_json;
+//extern crate rmp_serde;
+//extern crate rmpv;
 extern crate ws;
 extern crate hyper;
 extern crate tokio_core;

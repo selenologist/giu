@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize, Serializer as SerdeSerializer, Deserializer as SerdeDeserializer};
-use rmp_serde::{Deserializer, Serializer};
-use rmpv;
+//use rmp_serde::{Deserializer, Serializer};
+//use rmpv;
+use serde_json::{Deserializer, Serializer};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::cell::{Cell, RefCell,RefMut};
 use std::rc::Rc;
 
@@ -11,49 +12,19 @@ use ws::{Message as WsMessage, Result as WsResult, Error as WsError, ErrorKind a
 pub type GraphId    = u32;
 pub type NodeId     = String;
 pub type PortId     = String;
-pub type FullPortId = (NodeId, PortId);
 pub type DataId     = String;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag="type")]
 pub enum Node{
-    Label{ id: DataId },
-    Labelled{ id: DataId, nodes: Box<Node> },
-    Container{ nodes: Vec<Node> },
-    Knob{ id: DataId },
-    Button{ id: DataId },
-    BiPort{ id: PortId },
-    InPort{ id: PortId },
-    OutPort{ id: PortId }
-}
-
-impl Node{
-    pub fn find_port(&self, port: &PortId) -> Option<()>{
-        use self::Node::*;
-        match *self{
-            BiPort{ref id}  |
-            InPort{ref id}  |
-            OutPort{ref id} => {
-                if id == port {
-                    Some(())
-                }
-                else{
-                    None
-                }
-            },
-            Labelled{ nodes: ref n, .. } =>
-                n.find_port(port),
-            Container{ nodes: ref v } => {
-                if v.iter().any(|ref n| n.find_port(port).is_some()){
-                    Some(())
-                }
-                else{
-                    None
-                }
-            },
-            _ => None
-        }
-    }
+    Label     { data: DataId },
+    Labelled  { data: DataId, nodes: BTreeMap<NodeId, Node> },
+    Container { nodes: Vec<Node> },
+    Knob      { data: DataId },
+    Button    { data: DataId },
+    BiPort    { port: PortId },
+    InPort    { port: PortId },
+    OutPort   { port: PortId }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -101,9 +72,10 @@ impl ClientType{
 #[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize)]
 pub struct GraphData{
     pub nodes: BTreeMap<NodeId, Node>,
-    pub links: BTreeMap<FullPortId, FullPortId>,
+    pub links: BTreeMap<PortId, BTreeSet<PortId>>,
     pub data:  BTreeMap<DataId, DataValue>
 }
+
 #[derive(Clone, Default)]
 pub struct Graph{
     pub data:      Rc<RefCell<GraphData>>,
@@ -130,40 +102,21 @@ impl Graph{
         self.listeners.borrow_mut().remove(&token);
     }
 
-    pub fn add_link(&self,
-                from_node: &NodeId, from_port: &PortId,
-                to_node:   &NodeId, to_port:   &PortId)
+    pub fn add_link(&self, from_port: &PortId, to_port: &PortId)
         -> Response
     {
         let mut data = self.data.borrow_mut();
-        let all_ports_valid: bool = {
-            let from = data.nodes.get(from_node);
-            let to   = data.nodes.get(to_node);
 
-            from.is_some() &&
-              to.is_some() &&
-            from.unwrap().find_port(from_port).is_some() &&
-              to.unwrap().find_port(to_port  ).is_some()
-        };
-
-        if all_ports_valid{
-            let last_node = data.links.insert(
-                (from_node.clone(), from_port.clone()),
-                (to_node.clone(),   to_port.clone())
-            );
-            match last_node{
-                Some((ref last_to_node, ref last_to_port))
-                => // XXX blah we should handle multiple node connections if (last_to_node, last_to_port) == (to_node, to_port) =>
-                    Response::Warn(DataValue::from(format!(
-                        "Link ({},{}) -> ({},{}) already exists",
-                        from_node, from_port, to_node, to_port))),
-                None => Response::Ok
-            }
+        let mut entry = data.links.entry(from_port.clone())
+            .or_insert(BTreeSet::new());
+        let is_new = entry.insert(to_port.clone());
+        if !is_new {
+            Response::Warn(DataValue::from(format!(
+                "Link {} -> {} already exists",
+                from_port, to_port)))
         }
         else{
-            Response::Err(DataValue::from(format!(
-                "Link ({},{}) -> ({},{}) refers to invalid nodes or ports",
-                from_node, from_port, to_node, to_port)))
+            Response::Ok
         }
     }
 }
@@ -235,8 +188,8 @@ pub struct GraphList{
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag="type")]
 pub enum Command{
-    AddLink {from: FullPortId, to: FullPortId},
-    DelLink {from: FullPortId, to: FullPortId},
+    AddLink {from: PortId, to: PortId},
+    DelLink {from: PortId, to: PortId},
     SetData {id:   DataId,  value: DataValue},
     SetGraph{graph: Rc<RefCell<GraphData>>},
     FrontendAttach {id: GraphId},
