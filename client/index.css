@@ -1,31 +1,8 @@
-   
-
-#graph{
-    background-color: black;
-    color: white;
-    padding: 0.2em;
-    margin:  0.5em;
-    overflow: auto;
-}
-
-.Node{
-    background-color: blue;
-    color: white;
-    border: 2px solid grey;
-}
-
-.InPort{
-    background-color: cyan;
-    float: left;
-    width: 16px;
-    height: 16px;
-}
-
-.OutPort{
-    background-color: red;
-    float: right;
-    width: 16px;
-    height: 16px;
+svg {
+    background-color: #FFF;
+    position: absolute;
+    display:  block;
+    user-select: none;
 }
 
 

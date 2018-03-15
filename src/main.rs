@@ -1,5 +1,6 @@
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
+#![feature(try_trait)]
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;

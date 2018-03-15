@@ -3,13 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use ws::{listen, Handler, Factory, Sender, Handshake, Request, Response as WsResponse, Message, CloseCode};
 use ws::{Error as WsError, ErrorKind as WsErrorKind, Result as WsResult};
-use futures::future::{Future, IntoFuture};
 
 use graph::*;
 
 use std::thread;
 use std::thread::{JoinHandle};
-use std::io::Cursor;
 use std::fmt::Display;
 
 fn to_ws_err<D: Display>(thing: D, kind: WsErrorKind) -> WsError{
@@ -99,11 +97,8 @@ struct ClientCommon;
 impl ClientCommon{
     fn on_open(out: &Sender, store: &GraphStore, id: GraphId,
                client_type: ClientType) -> WsResult<()>{
-        if store.contains_key(id){
+        if let Some(_) = store.attach(id, client_type, out.clone()){
             trace!("Client supplied valid GraphId {}", id);
-            if let Err(e) = store.attach(id, client_type, out.clone()){
-                return Err(WsError::new(WsErrorKind::Internal, format!("{}", e)));
-            }
             if client_type == ClientType::Frontend {
                 let graph =
                     store
@@ -130,7 +125,7 @@ impl ClientCommon{
                   client_type: ClientType) -> WsResult<Option<Response>> {
         use graph::Command::*; 
         let response = match *command{
-            AddLink{ from: ref from, to: ref to } => {
+            AddLink{ source: ref from, target: ref to } => {
                 let graph = store.get(graph).unwrap();
                 
                 let result = graph.add_link(from, to);
@@ -202,15 +197,10 @@ impl BackendClient{
         match *command{
             SetGraph{ ref graph } => Ok({
                 trace!("set graph {:?}", graph);
-                match store.set_graph(self.graph, graph.clone()){
-                    Ok(k) => {},
-                    Err(e) => return Err(to_ws_internal(e))
-                };
-                match store.get(self.graph){
-                    Ok(g)  => g.repeat_to(client_type.opposite(), encode_update(command.clone())?),
-                    Err(e) => return Err(to_ws_internal(e))
-                };
-                Response::Ok}),
+                store.set_graph(self.graph, graph.clone()).unwrap(); // should not fail
+                store.repeat_to(self.graph, client_type.opposite(), encode_update(command.clone())?).unwrap();
+                Response::Ok
+            }),
             _ => {
                 return Err(
                       WsError::new(WsErrorKind::Protocol,
@@ -277,18 +267,14 @@ impl Handler for ServerHandler{
                 let state = match command{
                     FrontendAttach{ id } =>
                         Frontend(FrontendClient::on_open(out, store, id)?),
-                    BackendAttach { id } =>
-                        if let Some(id) = id{
-                            if !self.store.contains_key(id){
-                                self.store.empty_at(id).unwrap();
-                            }
-                            Backend(BackendClient::on_open(out, store, id)?)
-                        }
-                        else{
-                            Backend(BackendClient::on_open(out, store,
-                                self.store.new_empty().unwrap()
-                            )?)
-                        },
+                    BackendAttach { id } => {
+                        let id = match id{
+                            Some(id) if self.store.contains_key(id) => id,
+                            Some(id) => self.store.empty_at(id),
+                            None     => self.store.new_empty()
+                        };
+                        Backend(BackendClient::on_open(out, store, id)?)
+                    },
                     _ => {
                         return Err(
                             WsError::new(WsErrorKind::Protocol,
@@ -343,8 +329,8 @@ pub fn launch_thread() -> JoinHandle<()>{
         nodes: {
             let mut map = BTreeMap::new();
             map.insert("TestLabel".into(), Node::Label{data: "TestData".into()});
-            map.insert("InPortNode".into(), Node::InPort{port: "TestInPort".into()});
-            map.insert("OutPortNode".into(), Node::OutPort{port: "TestOutPort".into()});
+            map.insert("InPortNode".into(), Node::InPort);
+            map.insert("OutPortNode".into(), Node::OutPort);
             map
         },
         links: BTreeMap::new(),
