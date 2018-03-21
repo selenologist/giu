@@ -8,18 +8,14 @@ use std::path::{Path, PathBuf};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::net::SocketAddr;
-use std::time::SystemTime;
 
-use rebuilder::InvalidatedReceiver;
+use rebuilder::InvalidationReceiverChain;
 use filecache::FileCache;
-use filethread::FileThreadPool;
-
-pub type InMemoryFile = (SystemTime, Vec<u8>);
+use filethread::SharedMemoryFile;
 
 pub struct FileServerInternal{
-    root:           PathBuf,
-    cache:          FileCache,
-    file_threads:   FileThreadPool,
+    root:  PathBuf,
+    cache: FileCache,
 }
 
 impl FileServerInternal{
@@ -126,16 +122,17 @@ impl Service for FileServer{
         let path = self.decode_path(&req);
 
         let fetch =
-            self.file_threads
-                .fetch_with_cache(self.cache.clone(), path.clone());
+            self.cache
+                .async_fetch(path.clone());
         
         box fetch.and_then({
                 let reqaddr = reqaddr.clone();
-                move |imf: Rc<InMemoryFile>| {
+                let path    = path.as_path();
+                move |smf: SharedMemoryFile| {
             // ToDo: etag?
-            let (mod_time, file) = (&imf.0, imf.1.clone());
+            let (mod_time, file) = *smf;
             let size = file.len() as u64;
-            let modified = header::HttpDate::from(*mod_time);
+            let modified = header::HttpDate::from(mod_time);
             let mut res = Response::new()
                 .with_header(header::ContentLength(size))
                 .with_header(header::LastModified(modified));
@@ -145,27 +142,29 @@ impl Service for FileServer{
             }
             info!("{:>20} - 200 - {}", reqaddr, path.display());
             Ok(res)
-        }}).or_else(move |e| {
-            use std::io::ErrorKind::*;
-            let (path, k) = e;
-            match k.kind(){
-                PermissionDenied => {
-                    error!("{:>20} - 403 - {}", reqaddr, path);
-                    Ok(Response::new()
-                       .with_status(StatusCode::Forbidden)
-                       .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
-                },
-                NotFound => {
-                    error!("{:>20} - 404 - {}", reqaddr, path);
-                    Ok(Response::new()
-                       .with_status(StatusCode::NotFound)
-                       .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
-                },
-                _ => {
-                    error!("{:>20} - Error: {:?}", reqaddr, k);
-                    Ok(Response::new()
-                       .with_status(StatusCode::InternalServerError)
-                       .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>",k))))
+        }}).or_else({
+            let path = path.as_path().to_str().unwrap_or("<nonunicode>");
+            move |io| {
+                use std::io::ErrorKind::*;
+                match io.kind(){
+                    PermissionDenied => {
+                        error!("{:>20} - 403 - {}", reqaddr, path);
+                        Ok(Response::new()
+                           .with_status(StatusCode::Forbidden)
+                           .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
+                    },
+                    NotFound => {
+                        error!("{:>20} - 404 - {}", reqaddr, path);
+                        Ok(Response::new()
+                           .with_status(StatusCode::NotFound)
+                           .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
+                    },
+                    _ => {
+                        error!("{:>20} - Error: {:?}", reqaddr, io);
+                        Ok(Response::new()
+                           .with_status(StatusCode::InternalServerError)
+                           .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>", io))))
+                    }
                 }
             }
         })
@@ -176,12 +175,13 @@ impl Service for FileServer{
 pub struct FileServer(Rc<FileServerInternal>);
 
 impl FileServer{
-    pub fn new(threads: usize, base_path: &Path, invalidated_rx: InvalidatedReceiver) -> FileServer{
+    pub fn new(root: PathBuf, cache: FileCache)
+        -> FileServer
+{
         FileServer(Rc::new(
             FileServerInternal{
-                root:         base_path.into(),
-                cache:        FileCache::new(invalidated_rx),
-                file_threads: FileThreadPool::new(threads)
+                root,
+                cache,
             }
         ))
     }

@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-//use rmp_serde;
 use serde_json;
 use ws::{listen, Handler, Factory, Sender, Handshake, Request, Response as WsResponse, Message, CloseCode};
 use ws::{Error as WsError, ErrorKind as WsErrorKind, Result as WsResult};
@@ -10,8 +8,6 @@ use std::thread;
 use std::thread::{JoinHandle};
 use std::fmt;
 use std::result;
-
-use rebuilder::{InvalidatedReceiver, InvalidatedReceiverMaker};
 
 enum PossibleErr{
     Ws(WsError),
@@ -256,7 +252,7 @@ impl ServerHandler{
         let response = match self.state.clone() {
             Frontend(client) =>
                 client.on_command(&self.out, &self.store, &command)?,
-            Backend(client) =>
+            Backend(client) => // different type for client than the above match
                 client.on_command(&self.out, &self.store, &command)?,
             AwaitingType => {
                 let out   = &self.out;
@@ -312,40 +308,23 @@ impl Handler for ServerHandler{
         match self.state{
             Backend(BackendClient{ graph }) |
             Frontend(FrontendClient{ graph }) => {
-                self.store.remove_listener(graph, self.out.token().0);
+                self.store.remove_listener(graph, self.out.token().0)
+                    .unwrap();
             }
             _ => {}
         }
     }
 }
 
+#[derive(Default)]
 struct ServerFactory{
     store: GraphStore,
-    invalidated_rx_maker: InvalidatedReceiverMaker
 }
 
 impl Factory for ServerFactory{
     type Handler = ServerHandler;
 
-    fn connection_made(&mut self, out: Sender) -> Self::Handler{
-        let mut invalidated_rx = self.invalidated_rx_maker.add_rx();
-        let inform_out = out.clone();
-        // ahahah look at this, it leaks threads because ws::Sender has no
-        // disconenction mechanism. I just really wanted this to work.
-        thread::spawn(move || loop {
-            match invalidated_rx.recv(){
-                Ok(s) => {
-                    if s.ends_with("main.js"){
-                        inform_out.send(
-                            encode_update(Command::Reload).unwrap()
-                        ).unwrap();
-                        // this client will reload now so we may as well kill this thread.
-                        // We'll still leak any threads that don't get this far though.
-                        return
-                    }
-                },
-                Err(e) => panic!(e)
-            }});
+    fn connection_made(&mut self, out: Sender) -> Self::Handler{ 
         ServerHandler{
             out,
             store: self.store.clone(),
@@ -355,7 +334,7 @@ impl Factory for ServerFactory{
     }
 }
 
-pub fn launch_thread(invalidated_rx_maker: InvalidatedReceiverMaker)
+pub fn launch_thread()
     -> JoinHandle<()>
 {
     use std::collections::BTreeMap;
@@ -381,10 +360,7 @@ pub fn launch_thread(invalidated_rx_maker: InvalidatedReceiverMaker)
     thread::Builder::new()
         .name("websocket".into())
         .spawn(move || {
-        let mut factory = ServerFactory{
-            store: GraphStore::default(),
-            invalidated_rx_maker
-        };
+        let mut factory = ServerFactory::default();
         let listen_addr = "127.0.0.1:3001";
         info!("Attempting to listen on {}", listen_addr);
         listen(listen_addr, |out| factory.connection_made(out)).unwrap()

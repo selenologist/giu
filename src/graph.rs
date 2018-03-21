@@ -1,20 +1,16 @@
-use serde::{Deserialize, Serialize, Serializer as SerdeSerializer, Deserializer as SerdeDeserializer};
-//use rmp_serde::{Deserializer, Serializer};
-//use rmpv;
-use serde_json::{Deserializer, Serializer};
-
 use std::collections::{BTreeMap, BTreeSet};
-use std::cell::{Cell, RefCell,RefMut};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::fmt;
 
-use ws::{Message as WsMessage, Result as WsResult, Error as WsError, ErrorKind as WsErrorKind, Sender as WsSender};
+use ws::{Message as WsMessage, Error as WsError, Sender as WsSender};
 
 pub type GraphId    = u32;
 pub type NodeId     = String;
 pub type PortId     = String;
 pub type DataId     = String;
 
+#[derive(Debug)]
 pub enum PossibleErr{
     Ws(WsError),
     String(String),
@@ -144,7 +140,7 @@ impl Graph{
     {
         let mut data = self.data.borrow_mut();
 
-        let mut entry = data.links.entry(source_port.clone())
+        let entry = data.links.entry(source_port.clone())
             .or_insert(BTreeSet::new());
         let is_new = entry.insert(target_port.clone());
         if !is_new {
@@ -238,7 +234,6 @@ pub enum Command{
     SetGraph{graph: Rc<RefCell<GraphData>>},
     FrontendAttach {id: GraphId},
     BackendAttach  {id: Option<GraphId>},
-    Reload // that the client should reload the page
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]

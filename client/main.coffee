@@ -92,7 +92,7 @@ buildLabelled = (g, node, style) ->
         .attr("fill", "red")
         .attr("x", style.padding)
         .text(getDataAsString(node.data))
-    label.attr("y", () -> label.node().getBBox().height)
+    label.attr("y", -> label.node().getBBox().height)
 
 buildNodeType = {
     Label:    buildLabelled
@@ -171,8 +171,7 @@ delLink = (source, target) ->
             l.source == source && target == target),
             1)
 
-
-d3setup = () ->
+d3setup = ->
     colors = d3.scaleOrdinal(d3.schemeCategory10)
 
     svg = d3
@@ -186,15 +185,15 @@ d3setup = () ->
         .attr("class", "nodes")
         .selectAll(".nodes")
    
-    tick = () ->
+    tick = ->
         # update nodes with recomputed position
         for _, d of graph.nodes
           d3.select("g#" + d.node)
-            .attr("transform", () ->
+            .attr("transform", ->
                 "translate(" + d.x + "," + d.y + ")")
         return
 
-    rebuildNodes = () ->
+    rebuildNodes = ->
         node = nodegroup
             .data(graph.nodes)
             .enter().append("g")
@@ -208,7 +207,7 @@ d3setup = () ->
             .on('tick', tick)
         
 
-    rebuildLinks = () ->
+    rebuildLinks = ->
         linkgroup = svg.append("g")
             .attr("class", "links")
             .selectAll("path")
@@ -230,7 +229,7 @@ d3setup = () ->
 
         window.setTimeout(rebuildLinks, 500)
 
-    rebuild = () ->
+    rebuild = ->
         rebuildNodes()
         rebuildLinks()
     
@@ -242,7 +241,7 @@ decode = (data) ->
     # msgpack.decode data
     JSON.parse(data)
 
-frontend = () ->
+frontend = ->
     ws = new WebSocket('ws://127.0.0.1:3001', 'selenologist-node-editor')
     #ws.binaryType = 'arraybuffer'
 
@@ -276,14 +275,10 @@ frontend = () ->
     del_link = (c) ->
         delLink(c.source, c.target)
 
-    reload = (c) ->
-        location.reload()
-
     command = {
         SetGraph: set_graph,
         AddLink:  add_link,
         DelLink:  del_link,
-        Reload:   reload
     }
 
     process_command = (r) ->
@@ -345,7 +340,7 @@ frontend = () ->
         payload = decode e.data
         next = next(payload)
 
-backend = () ->
+backend = ->
     ws = new WebSocket('ws://127.0.0.1:3001', 'selenologist-node-editor')
     #ws.binaryType = 'arraybuffer'
 
@@ -421,4 +416,16 @@ backend = () ->
         #console.log(end + ' got message', payload)
         next = next(payload)
 
+reloader = ->
+    ws = new WebSocket('ws://127.0.0.1:3002', 'selenologist-minimal-reloader')
+    
+    reload = (c) ->
+        location.reload()
+    
+    ws.onmessage = (e) ->
+        if e.data == "Reload"
+            reload()
+        # yup that's it
+
+reloader()
 backend()

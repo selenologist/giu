@@ -1,4 +1,3 @@
-use hyper::header::ContentLength;
 use hyper::server::{Http, Request, Response, Service, NewService};
 use hyper::Error;
 use futures::Future;
@@ -9,7 +8,7 @@ use std::thread::{JoinHandle};
 use std::io;
 use time;
 
-use rebuilder::InvalidatedReceiver;
+use rebuilder::InvalidationReceiverChain;
 use file::FileServer;
 
 type ResponseFuture = Box<Future<Item=Response, Error=Error>>;
@@ -35,11 +34,12 @@ struct ServiceFactory{
 }
 
 impl ServiceFactory{
-    fn new(file_threads: usize, invalidated_rx: InvalidatedReceiver) -> ServiceFactory{
+    fn new(file_threads: usize, invalidation_rx: InvalidationReceiverChain)
+        -> ServiceFactory {
         ServiceFactory {
             proto:
                 MainService{
-                    file: FileServer::new(file_threads, Path::new("client/"), invalidated_rx),
+                    file: FileServer::new(file_threads, Path::new("client/"), invalidation_rx),
                     //wss_factory: websocket::ServerFactory::default()
                 }
         }
@@ -57,13 +57,14 @@ impl NewService for ServiceFactory{
     }
 }
 
-pub fn launch_thread(invalidated_rx: InvalidatedReceiver) -> JoinHandle<()>{
+pub fn launch_thread(invalidation_rx: InvalidationReceiverChain)
+    -> JoinHandle<()>{
     thread::Builder::new()
         .name("HTTP".into())
         .spawn(move ||{
     let addr_string = "127.0.0.1:3000";
     let addr        = addr_string.parse().unwrap();
-    let factory     = ServiceFactory::new(4, invalidated_rx);
+    let factory     = ServiceFactory::new(4, invalidation_rx);
     let server      = Http::new().bind(&addr, factory).unwrap();
 
     info!("Starting server on http://{}", addr_string);
