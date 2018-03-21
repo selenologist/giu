@@ -6,6 +6,7 @@ use serde_json::{Deserializer, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::cell::{Cell, RefCell,RefMut};
 use std::rc::Rc;
+use std::fmt;
 
 use ws::{Message as WsMessage, Result as WsResult, Error as WsError, ErrorKind as WsErrorKind, Sender as WsSender};
 
@@ -13,6 +14,42 @@ pub type GraphId    = u32;
 pub type NodeId     = String;
 pub type PortId     = String;
 pub type DataId     = String;
+
+pub enum PossibleErr{
+    Ws(WsError),
+    String(String),
+    None
+}
+
+impl fmt::Display for PossibleErr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::PossibleErr::*;
+        match *self{
+            Ws(ref w)     => w.fmt(f),
+            String(ref s) => s.fmt(f),
+            None          => (None).fmt(f)
+        }
+    }
+}
+impl Into<PossibleErr> for String{
+    fn into(self) -> PossibleErr{
+        PossibleErr::String(self)
+    }
+}
+impl Into<PossibleErr> for ::std::option::NoneError{
+    fn into(self) -> PossibleErr{
+        PossibleErr::None
+    }
+}
+
+impl From<WsError> for PossibleErr{
+    fn from(g: WsError) -> PossibleErr{
+        PossibleErr::Ws(g)
+    }
+}
+
+type Result<T> = ::std::result::Result<T, PossibleErr>;
+
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag="type")]
@@ -131,12 +168,12 @@ impl GraphStore{
         self.1.set(new_id + 1);
         new_id
     }
-    pub fn get(&self, id: GraphId) -> Option<Graph>{
+    pub fn get(&self, id: GraphId) -> Result<Graph>{
         if let Some(g) = self.0.borrow().get(&id){
-            Some(g.clone())
+            Ok(g.clone())
         }
         else{
-            None
+            Err(PossibleErr::None)
         }
     }
     pub fn contains_key(&self, id: GraphId) -> bool{
@@ -145,8 +182,8 @@ impl GraphStore{
     pub fn insert(&self, id: GraphId, graph: Graph){
         self.0.borrow_mut().insert(id, graph);
     }
-    pub fn remove_listener(&self, graph: GraphId, token: usize){
-        self.get(graph).unwrap().remove_listener(token);
+    pub fn remove_listener(&self, graph: GraphId, token: usize) -> Result<()>{
+        Ok(self.get(graph)?.remove_listener(token))
     }
    
     pub fn new(&self, graph: Graph) -> GraphId{
@@ -162,21 +199,21 @@ impl GraphStore{
         id
     }
 
-    pub fn attach(&self, id: GraphId, client_type: ClientType, sender: WsSender) -> Option<usize>{
+    pub fn attach(&self, id: GraphId, client_type: ClientType, sender: WsSender) -> Result<usize>{
         let g = self.get(id)?;
         let mut l = g.listeners.borrow_mut();
-        l.insert(sender.token().0, ((client_type, sender)));
-        Some(l.len())
+        l.insert(sender.token().0, (client_type, sender));
+        Ok(l.len())
     }
-    pub fn repeat_to(&self, id: GraphId, client_type: ClientType, msg: WsMessage) -> Option<()>{
+    pub fn repeat_to(&self, id: GraphId, client_type: ClientType, msg: WsMessage) -> Result<()>{
         self.get(id)?
             .repeat_to(client_type, msg);
-        Some(())
+        Ok(())
     }
-    pub fn set_graph(&self, id: GraphId, graph_data: Rc<RefCell<GraphData>>) -> Option<()>{
+    pub fn set_graph(&self, id: GraphId, graph_data: Rc<RefCell<GraphData>>) -> Result<()>{
         let g = self.get(id)?;
         g.data.swap(&graph_data);
-        Some(())
+        Ok(())
     }
 
     pub fn list(&self) -> GraphList{
@@ -200,7 +237,8 @@ pub enum Command{
     SetData {id:   DataId,  value: DataValue},
     SetGraph{graph: Rc<RefCell<GraphData>>},
     FrontendAttach {id: GraphId},
-    BackendAttach  {id: Option<GraphId>}
+    BackendAttach  {id: Option<GraphId>},
+    Reload // that the client should reload the page
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]

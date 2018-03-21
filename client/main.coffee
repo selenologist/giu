@@ -18,7 +18,6 @@ rebuildNodes = false
 rebuild = false # set by d3setup, call to update after modifying state
 
 getPosition = (sel) ->
-    console.log('sel', sel)
     r = sel.node().getBoundingClientRect()
     x = r.x - r.width/2
     y = r.y - r.height/2
@@ -162,8 +161,8 @@ enumerateNodes = (parent, nodes) ->
 addLink = (source, target) ->
     console.log("adding link between ", source, 'and', target)
     graph.links.push({
-        source: graph.ports[source],
-        target: graph.ports[target]
+        source: source,
+        target: target
     })
 
 delLink = (source, target) ->
@@ -187,10 +186,6 @@ d3setup = () ->
         .attr("class", "nodes")
         .selectAll(".nodes")
    
-    linkgroup = svg.append("g")
-        .attr("class", "links")
-        .selectAll("path")
-
     tick = () ->
         # update nodes with recomputed position
         for _, d of graph.nodes
@@ -211,16 +206,28 @@ d3setup = () ->
             .force('charge', d3.forceManyBody())
             .force('center', d3.forceCenter(300, 300))
             .on('tick', tick)
+        
 
     rebuildLinks = () ->
-        link = linkgroup
-            .data(graph.links)
-            .enter()
-            .append("path")
-            .attr("stroke", "yellow")
-            .attr("d", (d) ->
-                "M" + getPosition(d.source.selector) +
-                "L" + getPosition(d.target.selector))
+        linkgroup = svg.append("g")
+            .attr("class", "links")
+            .selectAll("path")
+
+        links = linkgroup
+                .data(graph.links, (d) ->
+                    x = d.source + "#" + d.target
+                    console.log('x', x)
+                    x)
+
+        links.exit().remove()
+
+        links.enter()
+             .append("path")
+             .attr("stroke", "yellow")
+             .attr("d", (d) ->
+                "M" + getPosition(graph.ports[d.source].selector) +
+                "L" + getPosition(graph.ports[d.target].selector))
+
         window.setTimeout(rebuildLinks, 500)
 
     rebuild = () ->
@@ -269,10 +276,14 @@ frontend = () ->
     del_link = (c) ->
         delLink(c.source, c.target)
 
+    reload = (c) ->
+        location.reload()
+
     command = {
         SetGraph: set_graph,
         AddLink:  add_link,
-        DelLink:  del_link
+        DelLink:  del_link,
+        Reload:   reload
     }
 
     process_command = (r) ->

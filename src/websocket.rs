@@ -4,78 +4,94 @@ use serde_json;
 use ws::{listen, Handler, Factory, Sender, Handshake, Request, Response as WsResponse, Message, CloseCode};
 use ws::{Error as WsError, ErrorKind as WsErrorKind, Result as WsResult};
 
-use graph::*;
+use graph::{PossibleErr as GraphErr, *};
 
 use std::thread;
 use std::thread::{JoinHandle};
-use std::fmt::Display;
+use std::fmt;
+use std::result;
 
-fn to_ws_err<D: Display>(thing: D, kind: WsErrorKind) -> WsError{
-    WsError::new(kind,
-                 format!("{}", thing))
+use rebuilder::{InvalidatedReceiver, InvalidatedReceiverMaker};
+
+enum PossibleErr{
+    Ws(WsError),
+    String(String),
+    GraphErr(GraphErr),
+    JsonErr(serde_json::Error),
+    Disp(Box<fmt::Display>),
+    None
 }
 
-fn to_ws_internal<D: Display>(thing: D) -> WsError{
-    to_ws_err(thing, WsErrorKind::Internal)
-}
-
-/*
-fn decode_command(msg: Message) -> WsResult<Command>{
-    use rmpv;
-    use std::io::Read;
-    match msg{
-        Message::Text(..) =>
-            Err(WsError::new(
-                WsErrorKind::Protocol,
-                String::from("text received where binary msgpack expected"))),
-        Message::Binary(b) => {
-            let res: Result<Command, _> = rmp_serde::decode::from_slice(&b[..]);
-            match res{
-                Ok(k)  => Ok(k),
-                Err(e) => Err(WsError::new(WsErrorKind::Protocol,
-                                           format!("decode_command failed {:?}, val: {:?}",
-                                                   e,{
-                    let mut cur = Cursor::new(&b[..]);
-                    let v: rmpv::Value = rmpv::decode::value::read_value(&mut cur).unwrap();
-                    v
-                })))
-            }
-       }
-   }
-}
-
-fn encode_response(response: Response) -> WsResult<Message>{
-    match rmp_serde::encode::to_vec_named(&response){
-        Ok(v)  => Ok(Message::Binary(v)),
-        Err(e) => Err(WsError::new(WsErrorKind::Internal, format!("encode_response failed {:?}", e)))
+impl fmt::Display for PossibleErr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::PossibleErr::*;
+        match *self{
+            Ws(ref w)       => w.fmt(f),
+            String(ref s)   => s.fmt(f),
+            GraphErr(ref g) => g.fmt(f),
+            JsonErr(ref j)  => j.fmt(f),
+            Disp(ref d)     => d.fmt(f),
+            None            => (None).fmt(f)
+        }
     }
 }
 
-fn encode_update<T: Into<Update>>(update: T) -> WsResult<Message>{
-    match rmp_serde::encode::to_vec_named(&update.into()){
-        Ok(v)  => Ok(Message::Binary(v)),
-        Err(e) => Err(WsError::new(WsErrorKind::Internal, format!("encode_update failed {:?}", e)))
+type Result<T> = result::Result<T, PossibleErr>;
+
+impl From<::std::option::NoneError> for PossibleErr{
+    fn from(_: ::std::option::NoneError) -> PossibleErr{
+        PossibleErr::None
     }
 }
-*/
 
-fn decode_command(msg: Message) -> WsResult<Command>{
-    use serde_json::Value;
+impl From<WsError> for PossibleErr{
+    fn from(g: WsError) -> PossibleErr{
+        PossibleErr::Ws(g)
+    }
+}
+
+impl From<GraphErr> for PossibleErr{
+    fn from(g: GraphErr) -> PossibleErr{
+        PossibleErr::GraphErr(g)
+    }
+}
+
+impl From<serde_json::Error> for PossibleErr{
+    fn from(j: serde_json::Error) -> PossibleErr{
+        PossibleErr::JsonErr(j)
+    }
+}
+
+
+fn to_ws_err(e: PossibleErr, kind: WsErrorKind) -> WsError{
+    use self::GraphErr::Ws as GWs;
+    use self::PossibleErr::*;
+    match e{
+        Ws(w) | GraphErr(GWs(w)) => w,
+        _ => WsError::new(kind,
+                          format!("{}", e))
+    }
+}
+
+fn to_ws(e: PossibleErr) -> WsError{
+    to_ws_err(e, WsErrorKind::Internal)
+}
+
+impl Into<WsError> for PossibleErr{
+    fn into(self) -> WsError{
+       to_ws(self)
+    }
+}
+
+fn decode_command(msg: Message) -> Result<Command>{
     match msg{
         Message::Text(t) => {
-            let res: Result<Command, _> = serde_json::from_str(&t[..]);
-            match res{
-                Ok(k)  => Ok(k),
-                Err(e) => Err(WsError::new(WsErrorKind::Protocol,
-                                           format!("decode_command failed {:?}, got val: {:?}",
-                                                   e, {
-                                                let v: Result<Value,_> = serde_json::from_str(&t[..]); v})))
-            }
+            Ok(serde_json::from_str(&t[..])?)
         },
         Message::Binary(..) =>
             Err(WsError::new(
-                    WsErrorKind::Protocol,
-                    format!("binary message received where expecting text JSON")))
+                WsErrorKind::Protocol,
+                format!("binary message received where expecting text JSON")).into())
     }
 }
 
@@ -96,22 +112,9 @@ fn encode_update<T: Into<Update>>(update: T) -> WsResult<Message>{
 struct ClientCommon;
 impl ClientCommon{
     fn on_open(out: &Sender, store: &GraphStore, id: GraphId,
-               client_type: ClientType) -> WsResult<()>{
-        if let Some(_) = store.attach(id, client_type, out.clone()){
+               client_type: ClientType) -> Result<()>{
+        if let Ok(_) = store.attach(id, client_type, out.clone()){
             trace!("Client supplied valid GraphId {}", id);
-            if client_type == ClientType::Frontend {
-                let graph =
-                    store
-                    .get(id)
-                    .unwrap();
-                out.send(
-                    encode_update(
-                        Command::SetGraph{
-                            graph: graph.data.clone()
-                        }
-                    )?
-                )?;
-            }
             Ok(())
         }
         else{
@@ -120,13 +123,13 @@ impl ClientCommon{
             Ok(()) //Err(WsError::new(WsErrorKind::Protocol, err))
         }
     }
-    fn on_command(out: &Sender, store: &GraphStore,
+    fn on_command(_out: &Sender, store: &GraphStore,
                   command: &Command, graph: GraphId,
-                  client_type: ClientType) -> WsResult<Option<Response>> {
+                  _client_type: ClientType) -> Result<Option<Response>> {
         use graph::Command::*; 
         let response = match *command{
             AddLink{ source: ref from, target: ref to } => {
-                let graph = store.get(graph).unwrap();
+                let graph = store.get(graph)?;
                 
                 let result = graph.add_link(from, to);
                 match result{
@@ -149,26 +152,31 @@ struct FrontendClient{
 }
 
 impl FrontendClient{
-    fn on_open(out: &Sender, store: &GraphStore, id: GraphId) -> WsResult<Self>{
+    fn on_open(out: &Sender, store: &GraphStore, id: GraphId) -> Result<Self>{
         ClientCommon::on_open(out, store, id, ClientType::Frontend)?;
         trace!("Frontend attached to GraphId {}", id);
+        out.send(
+            encode_update(
+                Command::SetGraph{
+                    graph: store.get(id)?.data.clone()
+                }
+            )?
+        )?;
         Ok(FrontendClient{ graph: id })
     }
 
     fn on_command(&self, out: &Sender, store: &GraphStore,
-                  command: &Command) -> WsResult<Response> {
+                  command: &Command) -> Result<Response> {
         use graph::Command::*;
        
         if let Some(common) = ClientCommon::on_command(out, store, command, self.graph, ClientType::Frontend)?{
             return Ok(common);
         }
         match *command{
-            _ => {
-                return Err(
-                      WsError::new(WsErrorKind::Protocol,
-                                   format!("Expected Frontend command, got {:?}",
-                                           command)));
-            }
+            _ => Err(WsError::new(
+                        WsErrorKind::Protocol,
+                        format!("Expected Frontend command, got {:?}",
+                                command)).into())
         }
     }
 }
@@ -179,14 +187,14 @@ struct BackendClient{
 }
 
 impl BackendClient{
-    fn on_open(out: &Sender, store: &GraphStore, id: GraphId) -> WsResult<Self>{
+    fn on_open(out: &Sender, store: &GraphStore, id: GraphId) -> Result<Self>{
         ClientCommon::on_open(out, store, id, ClientType::Backend)?;
         trace!("Backend attached to GraphId {}", id);
         Ok(BackendClient{ graph: id })
     } 
 
     fn on_command(&self, out: &Sender, store: &GraphStore,
-                  command: &Command) -> WsResult<Response> {
+                  command: &Command) -> Result<Response> {
         use graph::Command::*;
         let client_type = ClientType::Backend;
        
@@ -197,16 +205,14 @@ impl BackendClient{
         match *command{
             SetGraph{ ref graph } => Ok({
                 trace!("set graph {:?}", graph);
-                store.set_graph(self.graph, graph.clone()).unwrap(); // should not fail
-                store.repeat_to(self.graph, client_type.opposite(), encode_update(command.clone())?).unwrap();
+                store.set_graph(self.graph, graph.clone())?;
+                store.repeat_to(self.graph, client_type.opposite(),
+                                encode_update(command.clone())?)?;
                 Response::Ok
             }),
-            _ => {
-                return Err(
-                      WsError::new(WsErrorKind::Protocol,
-                                   format!("Expected Backend command, got {:?}",
-                                           command)));
-            }
+            _ => Err(WsError::new(WsErrorKind::Protocol,
+                                  format!("Expected Backend command, got {:?}",
+                                          command)).into())
         }
     }
 }
@@ -225,8 +231,8 @@ struct ServerHandler{
     addr:  String
 }
 
-impl Handler for ServerHandler{
-    fn on_open(&mut self, hs: Handshake) -> WsResult<()>{
+impl ServerHandler{
+    fn on_open_inner(&mut self, hs: Handshake) -> Result<()>{
         if let Some(ip_addr) = hs.peer_addr {
             let ip_string = format!("{}", ip_addr);
             info!("{:>20} - connection {:?} established", ip_string, self.out.token());
@@ -236,23 +242,14 @@ impl Handler for ServerHandler{
             debug!("Connection without IP address?");
         }
 
-        self.out.send(serde_json::to_string(
-            &self.store.list())
-            .unwrap())?;
+        self.out.send(
+            serde_json::to_string(
+                &self.store.list())?
+            )?;
 
         Ok(())
     }
-
-    fn on_request(&mut self, req: &Request) -> WsResult<WsResponse> {
-        let mut res = WsResponse::from_request(req)?;
-
-        let protocol_name = "selenologist-node-editor";
-        res.set_protocol(protocol_name);
-
-        Ok(res)
-    }
-
-    fn on_message(&mut self, msg: Message) -> WsResult<()> {
+    fn on_message_inner(&mut self, msg: Message) -> Result<()> {
         use self::ClientState::*;
         use graph::Command::{FrontendAttach, BackendAttach};
         let command = decode_command(msg)?;
@@ -275,11 +272,9 @@ impl Handler for ServerHandler{
                         };
                         Backend(BackendClient::on_open(out, store, id)?)
                     },
-                    _ => {
-                        return Err(
-                            WsError::new(WsErrorKind::Protocol,
-                                         "Expected FrontendAttach or BackendAttach, got something else"));
-                    }
+                    _ => 
+                      return Err(WsError::new(WsErrorKind::Protocol,
+                                         "Expected FrontendAttach or BackendAttach, got something else").into())
                 };
                 self.state = state;
                 Response::Ok
@@ -290,6 +285,25 @@ impl Handler for ServerHandler{
         }
         Ok(())
     }
+}
+
+impl Handler for ServerHandler{
+    fn on_open(&mut self, hs: Handshake) -> WsResult<()>{
+        self.on_open_inner(hs).map_err(|e|e.into())
+    }
+
+    fn on_request(&mut self, req: &Request) -> WsResult<WsResponse> {
+        let mut res = WsResponse::from_request(req)?;
+
+        let protocol_name = "selenologist-node-editor";
+        res.set_protocol(protocol_name);
+
+        Ok(res)
+    }
+
+    fn on_message(&mut self, msg: Message) -> WsResult<()> {
+        self.on_message_inner(msg).map_err(|e|e.into())
+    }
     
     fn on_close(&mut self, code: CloseCode, reason: &str){
         use self::ClientState::*;
@@ -298,22 +312,40 @@ impl Handler for ServerHandler{
         match self.state{
             Backend(BackendClient{ graph }) |
             Frontend(FrontendClient{ graph }) => {
-                self.store.remove_listener(graph, self.out.token().0)
+                self.store.remove_listener(graph, self.out.token().0);
             }
             _ => {}
         }
     }
 }
 
-#[derive(Default)]
 struct ServerFactory{
-    store: GraphStore,    
+    store: GraphStore,
+    invalidated_rx_maker: InvalidatedReceiverMaker
 }
 
 impl Factory for ServerFactory{
     type Handler = ServerHandler;
 
     fn connection_made(&mut self, out: Sender) -> Self::Handler{
+        let mut invalidated_rx = self.invalidated_rx_maker.add_rx();
+        let inform_out = out.clone();
+        // ahahah look at this, it leaks threads because ws::Sender has no
+        // disconenction mechanism. I just really wanted this to work.
+        thread::spawn(move || loop {
+            match invalidated_rx.recv(){
+                Ok(s) => {
+                    if s.ends_with("main.js"){
+                        inform_out.send(
+                            encode_update(Command::Reload).unwrap()
+                        ).unwrap();
+                        // this client will reload now so we may as well kill this thread.
+                        // We'll still leak any threads that don't get this far though.
+                        return
+                    }
+                },
+                Err(e) => panic!(e)
+            }});
         ServerHandler{
             out,
             store: self.store.clone(),
@@ -323,7 +355,9 @@ impl Factory for ServerFactory{
     }
 }
 
-pub fn launch_thread() -> JoinHandle<()>{
+pub fn launch_thread(invalidated_rx_maker: InvalidatedReceiverMaker)
+    -> JoinHandle<()>
+{
     use std::collections::BTreeMap;
     let d = GraphData{
         nodes: {
@@ -347,7 +381,10 @@ pub fn launch_thread() -> JoinHandle<()>{
     thread::Builder::new()
         .name("websocket".into())
         .spawn(move || {
-        let mut factory = ServerFactory::default();
+        let mut factory = ServerFactory{
+            store: GraphStore::default(),
+            invalidated_rx_maker
+        };
         let listen_addr = "127.0.0.1:3001";
         info!("Attempting to listen on {}", listen_addr);
         listen(listen_addr, |out| factory.connection_made(out)).unwrap()

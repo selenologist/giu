@@ -1,7 +1,9 @@
 use notify::{DebouncedEvent, Watcher, RecursiveMode, watcher};
 use subprocess::{Exec, ExitStatus};
 
-use std::sync::mpsc::{Sender, Receiver, channel};
+use bus::{BusReader, Bus};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel};
 use std::time::Duration;
 use std::io;
 use std::fs;
@@ -10,7 +12,24 @@ use std::thread;
 use std::thread::{JoinHandle};
 
 pub type InvalidatedPath = String;
-pub type InvalidatedReceiver = Receiver<InvalidatedPath>;
+pub type InvalidatedReceiver = BusReader<InvalidatedPath>;
+
+type InvalidatedSender = Arc<Mutex<Bus<InvalidatedPath>>>;
+
+static INVALIDATION_BUS_SIZE: usize = 16; // bounded number of unreceived elements on file invalidation bus, increase if necessary but this should be plenty
+
+// BusReader cannot be cloned so we have to keep hidden access to the bus itself
+// to be able to make more BusReaders elsewhere in the program.
+// This is so not ideal but it'll do
+pub struct InvalidatedReceiverMaker{
+    bus: InvalidatedSender
+}
+
+impl InvalidatedReceiverMaker{
+    pub fn add_rx(&self) -> InvalidatedReceiver{ // will block on mutex lock
+        self.bus.lock().unwrap().add_rx()
+    }
+}
 
 fn process_coffee(path: &Path) -> io::Result<()>{
     info!("Compiling {}", path.to_str().unwrap());
@@ -62,36 +81,43 @@ fn recursive_find(path: &Path) -> io::Result<()>{
     Ok(())
 }
 
-fn handle_event(event: DebouncedEvent, invalidation_tx: &Sender<InvalidatedPath>){
+fn handle_event(event: DebouncedEvent, invalidation_tx: &InvalidatedSender){
     use self::DebouncedEvent::*;
-    
+
+    // make a closure and reborrow even in Rename to prevent lock being held
+    // across expensive functions like process_coffee
+    // should only fail if this thread holds the lock which should never happen
+    let broadcast = |s| invalidation_tx.lock().unwrap().broadcast(s);
     match event{
         Create(p) |
         Write(p)  => {
             let s = String::from(p.to_str().unwrap());
             info!("File {} modified", s);
             check(&p);
-            invalidation_tx.send(s).unwrap();
+            broadcast(s);
         },
         Rename(old, new) => {
             let s1 = String::from(old.to_str().unwrap());
             let s2 = String::from(new.to_str().unwrap());
             info!("File {} renamed to {}", s1, s2);
-            invalidation_tx.send(s1).unwrap();
+            broadcast(s1);
             check(&new);
-            invalidation_tx.send(s2).unwrap();
+            broadcast(s2);
         },
         Remove(p) => {
             let s = String::from(p.to_str().unwrap());
             info!("File {} removed", s);
-            invalidation_tx.send(s).unwrap();
+            broadcast(s);
         }
         _ => ()
     }
 }
 
-pub fn launch_thread() -> (JoinHandle<()>, InvalidatedReceiver){
-    let (invalidation_tx, invalidation_rx) = channel();
+pub fn launch_thread() -> (JoinHandle<()>, InvalidatedReceiverMaker){
+    // must be Arc<Mutex<Bus>> so that InvalidatedReceiverMaker can add more receivers
+    let invalidation_tx = Arc::new(Mutex::new(Bus::new(INVALIDATION_BUS_SIZE)));
+    let invalidation_rx_maker = 
+        InvalidatedReceiverMaker{ bus: invalidation_tx.clone() };
     
     let handle = thread::Builder::new()
         .name("rebuilder".into())
@@ -114,5 +140,5 @@ pub fn launch_thread() -> (JoinHandle<()>, InvalidatedReceiver){
         }
     }).unwrap();
 
-    (handle, invalidation_rx)
+    (handle, invalidation_rx_maker)
 }

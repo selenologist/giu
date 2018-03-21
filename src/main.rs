@@ -16,6 +16,7 @@ extern crate futures;
 extern crate subprocess;
 extern crate regex;
 extern crate time;
+extern crate bus;
 
 #[macro_use]
 extern crate serde_derive;
@@ -115,9 +116,9 @@ fn main(){
         .init();
 
     // start threads
-    let (rebuilder, invalidation_rx) = rebuilder::launch_thread();
-    let http      = http::launch_thread(invalidation_rx);
-    let websocket = websocket::launch_thread();
+    let (rebuilder, invalidation_rx_maker) = rebuilder::launch_thread();
+    let http      = http::launch_thread(invalidation_rx_maker.add_rx());
+    let websocket = websocket::launch_thread(invalidation_rx_maker);
     debug!("Threads launched, waiting for join");
     http.join().unwrap();
     websocket.join().unwrap();
