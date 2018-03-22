@@ -420,7 +420,7 @@ reloader = ->
     ws = new WebSocket('ws://127.0.0.1:3002', 'selenologist-minimal-reloader')
     
     reload = (c) ->
-        location.reload()
+        location.reload(true)
     
     ws.onmessage = (e) ->
         if e.data == "Reload"

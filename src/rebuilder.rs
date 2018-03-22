@@ -42,22 +42,21 @@ impl<T: ::std::fmt::Debug> RepeatAfter<T>{
     pub fn get_mut(&mut self) -> &mut T{
         &mut self.0
     }
-    pub fn do_repeat(self) -> impl Future<Item=(), Error=BoundedSendError<T>>{
+    pub fn repeat(self) -> impl Future<Item=Option<BoundedSender<T>>, Error=BoundedSendError<T>>{
         if let Some(tx) = self.1{
             trace!("repeatafter called {:?}", self.0);
-            Either::A(tx.send(self.0).map(|_| ()))
+            Either::A(tx.send(self.0).map(|s| Some(s)))
         }
         else{
-            Either::B(future::ok(()))
+            Either::B(future::ok(None))
         }
     }
-    pub fn do_repeat_block(self) -> Result<(), BoundedSendError<T>>{
+    pub fn repeat_block(self) -> Result<Option<BoundedSender<T>>, BoundedSendError<T>>{
         if let Some(tx) = self.1{
-            trace!("repeatafter called {:?}", self.0);
-            tx.send(self.0).map(|_| ()).wait()
+            tx.send(self.0).wait().map(|s| Some(s))
         }
         else{
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -197,25 +196,24 @@ fn handle_event(event: DebouncedEvent, invalidation_tx: &mut InvalidationSender)
     use self::DebouncedEvent::*;
 
     let broadcast = move |s| invalidation_tx.clone().send(Arc::new(s)).wait().unwrap();
-    let s = |p: &PathBuf| -> String {
-        let s = p.to_str().unwrap_or("<nonunicode>"); // get PathBuf as string or "<nonunicode>" on unicode conversion failure
-        s.into()
-    };
+    fn to_str<'a>(p: &'a PathBuf) -> &'a str{
+        p.to_str().unwrap_or("<nonunicode>")
+    }
     match event{
         Create(p) |
         Write(p)  => {
-            info!("File {} modified", s(&p));
+            info!("File {} modified", to_str(&p));
             check(&p);
             broadcast(p);
         },
         Rename(old, new) => {
-            info!("File {} renamed to {}", s(&old), s(&new));
+            info!("File {} renamed to {}", to_str(&old), to_str(&new));
             broadcast(old);
             check(&new);
             broadcast(new);
         },
         Remove(p) => {
-            info!("File {} removed", s(&p));
+            info!("File {} removed", to_str(&p));
             broadcast(p);
         }
         _ => ()
@@ -235,7 +233,7 @@ pub fn launch_thread() -> (JoinHandle<()>, InvalidationReceiver){
 
         let (watcher_tx, watcher_rx) = std_channel();
 
-        let mut watcher = watcher(watcher_tx, Duration::from_secs(1)).unwrap();
+        let mut watcher = watcher(watcher_tx, Duration::from_millis(200)).unwrap();
 
         watcher.watch(watch_path, RecursiveMode::Recursive).unwrap();
 

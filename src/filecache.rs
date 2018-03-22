@@ -74,6 +74,10 @@ pub struct FileCacheState{
     file_threads:       FileThreadPool
 }
 
+fn to_str<'a>(rp: &'a RequestPath) -> &'a str{
+    rp.to_str().unwrap_or("<nonunicode>")
+}
+
 impl FileCacheState{
     pub fn new(n_threads: usize,
                invalidation_chain: InvalidationReceiverChain,
@@ -93,17 +97,17 @@ impl FileCacheState{
 
     pub fn get(store: &CacheStore, key: &RequestPath) -> Option<SharedMemoryFile>{
         if let Some(v) = store.get(key){
-            trace!("Cache hit {}", key.to_str().unwrap_or("<nonunicode>"));
+            trace!("Cache hit {}", to_str(key));
             Some(v.clone())
         }
         else{
-            trace!("Cache miss {}", key.to_str().unwrap_or("<nonunicode>"));
+            trace!("Cache miss {}", to_str(key));
             None
         }
     }
 
     pub fn insert(store: &mut CacheStore, key: RequestPath, value: SharedMemoryFile){
-        trace!("Storing {} in cache", key.to_str().unwrap_or("<nonunicode>"));
+        trace!("Caching {}", to_str(&key));
         store.insert(key, value); // we don't care if the file was already cached
     }
 
@@ -112,36 +116,26 @@ impl FileCacheState{
 
         let (mut store, file, chain, req_in) =
             (&mut self.store, self.file_threads, self.invalidation_chain, self.req_in);
-
-        enum FS<F,S>{
-            First(F),
-            Second(S)
+ 
+        let first = |a: RepeatAfter<InvalidationPath>, store: &mut CacheStore|{
+            Self::invalidate(store, a.get());
+            a.repeat_block().unwrap();
         };
 
-        let first = |a: RepeatAfter<InvalidationPath>, s: &mut CacheStore|{
-            Self::invalidate(s, a.get());
-            a.do_repeat_block().unwrap();
-        };
-
-        let second = |req: Request, s: &mut CacheStore|{
+        let second = |req: Request, store: &mut CacheStore|{
             let (path, resp_out) = req;
-            let (cached, mut next_store) = {
-                let osmf = {
-                    Self::get(&s, &path)
-                };
-                (osmf, s)
-            };
+            let (cached, store) =
+                (Self::get(&store, &path), store);
             if let Some(hit) = cached{
                 resp_out.send(Ok(hit))
                         .unwrap();
             }
             else{
-                let s = &mut next_store;
                 file.fetch(path.clone())
                     .map_err(|e| panic!(e))
                     .map(|r|{
                         if let Ok(ref smf) = r{
-                            Self::insert(s, path, smf.clone());
+                            Self::insert(store, path, smf.clone());
                         }
                         resp_out.send(r).unwrap();
                      })
@@ -149,6 +143,10 @@ impl FileCacheState{
             }
         };
 
+        enum FS<F,S>{
+            First(F),
+            Second(S)
+        };
 
         chain
             .recv_repeat_after()

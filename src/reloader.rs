@@ -68,7 +68,9 @@ pub fn launch_thread(invalidation_rx: InvalidationReceiverChain)
                     invalidation_rx.recv()
                         .map(move |p| {
                             let p = p.unwrap();
-                            if p.ends_with("main.js"){
+                            if p.ends_with("main.js") ||
+                               p.ends_with("index.html") ||
+                               p.ends_with("index.css"){
                                 broadcaster.send("Reload").unwrap();
                             }
                         }).wait().last().unwrap()

@@ -1,7 +1,7 @@
 use std::io;
 use std::io::Read;
 use std::path::{PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::fs::File;
 use std::time::SystemTime;
 use std::thread;
@@ -12,8 +12,7 @@ use futures::{Future, Sink, Stream};
 use futures::sync::mpsc::channel as bounded_channel; // rename this because defaulting to bounded is dumb
 use futures::sync::mpsc::Sender as BoundedSender;
 use futures::sync::mpsc::Receiver as BoundedReceiver;
-use futures::sync::oneshot::{Receiver as OneshotReceiver,
-                             Sender as OneshotSender,
+use futures::sync::oneshot::{Sender as OneshotSender,
                              channel as oneshot_channel,
                              Canceled};
 
@@ -21,9 +20,9 @@ pub type InMemoryFile = (SystemTime, Vec<u8>);
 pub type SharedMemoryFile = Arc<InMemoryFile>;
 
 pub type RequestPath = Arc<PathBuf>;
-type Request     = (RequestPath, OneshotSender<Response>);
+    type Request     = (RequestPath, OneshotSender<Response>);
 pub type Response    = io::Result<SharedMemoryFile>;
-pub type FileThreadResult = OneshotReceiver<Response>; // this is what the fetch futures are, but type aliases cannot actually be used as traits
+// pub type FileThreadResult = OneshotReceiver<Response>; <-- File thread responses look like this
 
 struct FileThreadState(BoundedReceiver<Request>);
 
@@ -78,9 +77,53 @@ pub struct FileThread{
     pub handle:  JoinHandle<()>
 }
 
+pub struct RoundRobin{
+    counter: AtomicUsize,
+    max:     usize
+}
+
+impl RoundRobin{
+    pub fn new(max: usize) -> RoundRobin{
+        RoundRobin{
+            counter: AtomicUsize::new(0),
+            max
+        }
+    }
+    pub fn get_next(&self) -> usize{
+        use std::sync::atomic::Ordering;
+        // warning: will be discontinuous at 2^64 operations due to overflow.
+        // If it ever gets that high.
+        self.counter.fetch_add(1, Ordering::AcqRel) % self.max
+
+        /* below implementation performs poorly when crowded
+         * test tests::bench_crowded_roundrobin ... bench: 43,618 ns/iter (+/- 40,604)
+         * test tests::bench_roundrobin         ... bench:     12 ns/iter (+/- 0) 
+         * vs
+         * test tests::bench_crowded_roundrobin ... bench: 2,908 ns/iter (+/- 3,542)
+         * test tests::bench_roundrobin         ... bench:    11 ns/iter (+/- 0)
+         * for the modulo version
+        loop{
+           let current = self.counter.load(Ordering::Acquire);
+           let next    = {
+               let next = current+1;
+               if next < self.max{
+                   next
+               }
+               else{
+                   0
+               }
+           };
+           let x= self.counter.compare_and_swap(current, next, Ordering::Release);
+           if x == current{
+               return current
+           }
+       }*/
+    }
+}
+
 pub struct FileThreadPool{
-    threads:        Vec<FileThread>,
-    next_thread:    Mutex<usize>, // used for round-robin selection of file threads
+    threads:   Vec<FileThread>,
+    scheduler: RoundRobin
 }
 
 impl FileThreadPool{
@@ -88,7 +131,7 @@ impl FileThreadPool{
         let threads = (0..n_threads).map(FileThread::new).collect();
         FileThreadPool{
             threads,
-            next_thread: Mutex::new(0)
+            scheduler: RoundRobin::new(n_threads)
         }
     }
 
@@ -96,23 +139,7 @@ impl FileThreadPool{
         -> impl Future<Item=Response, Error=Canceled>
     {
         // access the IO thread pool in a round-robin fashion
-        let current_thread = {
-            let mut thread  = self.next_thread.lock().unwrap();
-            let current = *thread;
-            let next    =
-                current.checked_add(1) // usize would have overflowed to zero anyway
-                       .unwrap_or(0);  // but ensure it definitely safely overflows
-            if next >= self.threads.len(){
-                // if the next thread exceeds the number of threads, the next thread is zero
-                *thread = 0;
-            }
-            else{
-                // otherwise, it's next_thread
-                *thread = next
-            }
-            current
-        };
-
+        let current_thread = self.scheduler.get_next();
         let req_out = &self.threads[current_thread].req_out;
        
         let (file_out, file_in) = oneshot_channel();

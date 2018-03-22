@@ -1,6 +1,7 @@
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
 #![feature(try_trait)]
+#![feature(test)]
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;
@@ -53,6 +54,43 @@ mod filethread;
 mod reloader;
 
 use rebuilder::InvalidationReceiverChain;
+
+#[cfg(test)]
+mod tests{
+    extern crate test;
+    use super::*;
+    use self::test::Bencher;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    
+    #[bench]
+    fn bench_roundrobin(b: &mut Bencher){
+        let rr = Arc::new(filethread::RoundRobin::new(8));
+        
+        b.iter(|| rr.get_next() );
+    }
+
+    #[bench]
+    fn bench_crowded_roundrobin(b: &mut Bencher){
+        let rr = Arc::new(filethread::RoundRobin::new(8));
+        let running =  Arc::new(AtomicBool::new(true));
+        let threads = (0..32).map(|_|{
+            let r = rr.clone();
+            let running = running.clone();
+            std::thread::spawn(move ||
+                while running.load(Ordering::Relaxed) == true{
+                    r.get_next();
+                })
+        }).collect::<Vec<std::thread::JoinHandle<_>>>();
+
+        b.iter(|| rr.get_next() );
+
+        running.store(false, Ordering::Relaxed);
+        for t in threads{
+            t.join().unwrap();
+        }
+    } 
+
+}
 
 fn main(){
     // configure logger    

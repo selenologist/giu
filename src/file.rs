@@ -100,7 +100,7 @@ impl FileServerInternal{
     }
 }
 
-fn io_error(io: io::Error, path: &String, reqpath: &String, reqaddr: &String) -> Response{
+fn io_error(io: io::Error, path: &str, reqpath: &String, reqaddr: &String) -> Response{
     use hyper::{StatusCode, Body};
     use std::io::ErrorKind::*;
     match io.kind(){
@@ -152,18 +152,17 @@ impl Service for FileServer{
         let fetch =
             self.cache
                 .fetch(path.clone());
-        let to_str = |p: Arc<PathBuf>| -> String {
-            let b: &PathBuf = p.borrow();
-            b.to_str()
-             .unwrap_or("<nonunicode>".into())
-             .into()
-        };
-        let path_str = to_str(path);
+
+        fn to_str<'a>(p: &'a Arc<PathBuf>) -> &'a str{
+            p.to_str().unwrap_or("<nonunicode>")
+        }
+
         box fetch
             .then(|r: Result<FileResponse,_>| r.unwrap())
-            .then(move |r: FileResponse| Ok(
+            .then(move |r: FileResponse|{
+                  let path_str = to_str(&path);
                   match r{
-                      Err(io) => io_error(io, &path_str, reqpath.borrow(), reqaddr.borrow()),
+                      Err(io) => Ok(io_error(io, path_str, reqpath.borrow(), reqaddr.borrow())),
                       Ok(smf) => {
                           // ToDo: etag?
                           let (mod_time, ref file) = *smf;
@@ -177,10 +176,11 @@ impl Service for FileServer{
                               res.set_body(Body::from(file.clone()));
                           }
                           info!("{:>20} - 200 - {}", reqaddr, path_str);
-                          res
+                          Ok(res)
                     }
-                }))
-        }
+                }
+            })
+    }
 }
 
 #[derive(Clone)]
