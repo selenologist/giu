@@ -4,14 +4,16 @@ use hyper::server::{Request, Response, Service};
 use hyper::Error;
 use futures::{Future, future};
 
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::io;
+use std::borrow::Borrow;
 
-use rebuilder::InvalidationReceiverChain;
 use filecache::FileCache;
-use filethread::SharedMemoryFile;
+use filethread::Response as FileResponse;
 
 pub struct FileServerInternal{
     root:  PathBuf,
@@ -25,7 +27,8 @@ impl FileServerInternal{
         use regex::{Regex, Replacer, Captures};
 
         lazy_static!{
-            static ref PERCENT_RE: Regex = Regex::new("%([0-9A-Fa-f]{2})").unwrap();
+            static ref PERCENT_RE: Regex =
+                Regex::new("%([0-9A-Fa-f]{2})").unwrap();
         }
 
         struct PercentReplacer;
@@ -97,6 +100,31 @@ impl FileServerInternal{
     }
 }
 
+fn io_error(io: io::Error, path: &String, reqpath: &String, reqaddr: &String) -> Response{
+    use hyper::{StatusCode, Body};
+    use std::io::ErrorKind::*;
+    match io.kind(){
+        PermissionDenied => {
+            error!("{:>20} - 403 - {}", reqaddr, path);
+            Response::new()
+               .with_status(StatusCode::Forbidden)
+               .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath)))
+        },
+        NotFound => {
+            error!("{:>20} - 404 - {}", reqaddr, path);
+            Response::new()
+               .with_status(StatusCode::NotFound)
+               .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath)))
+        },
+        _ => {
+            error!("{:>20} - Error: {:?}", reqaddr, io);
+            Response::new()
+               .with_status(StatusCode::InternalServerError)
+               .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>", io)))
+        }
+    }
+}
+
 type ResponseFuture = Box<Future<Item=Response, Error=Error>>;
 impl Service for FileServer{
     type Request  = Request;
@@ -110,8 +138,8 @@ impl Service for FileServer{
 
         let method  = req.method().clone();
         let uri     = req.uri();
-        let reqpath = String::from(req.path());
-        let reqaddr = format!("{}", req.remote_addr().unwrap_or(SocketAddr::from_str(&"0.0.0.0:0").unwrap()));
+        let reqpath = Rc::new(String::from(req.path()));
+        let reqaddr = Rc::new(format!("{}", req.remote_addr().unwrap_or(SocketAddr::from_str(&"0.0.0.0:0").unwrap())));
         if (method != Method::Head &&
             method != Method::Get) ||
             uri.is_absolute()
@@ -119,56 +147,40 @@ impl Service for FileServer{
             return box future::ok(Response::new().with_status(StatusCode::BadRequest))
         }
         
-        let path = self.decode_path(&req);
+        let path = Arc::new(self.decode_path(&req));
 
         let fetch =
             self.cache
-                .async_fetch(path.clone());
-        
-        box fetch.and_then({
-                let reqaddr = reqaddr.clone();
-                let path    = path.as_path();
-                move |smf: SharedMemoryFile| {
-            // ToDo: etag?
-            let (mod_time, file) = *smf;
-            let size = file.len() as u64;
-            let modified = header::HttpDate::from(mod_time);
-            let mut res = Response::new()
-                .with_header(header::ContentLength(size))
-                .with_header(header::LastModified(modified));
-            
-            if method == Method::Get {
-                res.set_body(Body::from(file));
-            }
-            info!("{:>20} - 200 - {}", reqaddr, path.display());
-            Ok(res)
-        }}).or_else({
-            let path = path.as_path().to_str().unwrap_or("<nonunicode>");
-            move |io| {
-                use std::io::ErrorKind::*;
-                match io.kind(){
-                    PermissionDenied => {
-                        error!("{:>20} - 403 - {}", reqaddr, path);
-                        Ok(Response::new()
-                           .with_status(StatusCode::Forbidden)
-                           .with_body(Body::from(format!("<h1>HTTP 403 - Forbidden</h1><p>File <tt>\"{}\"</tt> forbidden</p>", reqpath))))
-                    },
-                    NotFound => {
-                        error!("{:>20} - 404 - {}", reqaddr, path);
-                        Ok(Response::new()
-                           .with_status(StatusCode::NotFound)
-                           .with_body(Body::from(format!("<h1>HTTP 400 - Not Found</h1><p>File <tt>\"{}\"</tt> not found</p>", reqpath))))
-                    },
-                    _ => {
-                        error!("{:>20} - Error: {:?}", reqaddr, io);
-                        Ok(Response::new()
-                           .with_status(StatusCode::InternalServerError)
-                           .with_body(Body::from(format!("<h1>HTTP 500 - Internal Server Error</h1><tt>{:?}</tt>", io))))
+                .fetch(path.clone());
+        let to_str = |p: Arc<PathBuf>| -> String {
+            let b: &PathBuf = p.borrow();
+            b.to_str()
+             .unwrap_or("<nonunicode>".into())
+             .into()
+        };
+        let path_str = to_str(path);
+        box fetch
+            .then(|r: Result<FileResponse,_>| r.unwrap())
+            .then(move |r: FileResponse| Ok(
+                  match r{
+                      Err(io) => io_error(io, &path_str, reqpath.borrow(), reqaddr.borrow()),
+                      Ok(smf) => {
+                          // ToDo: etag?
+                          let (mod_time, ref file) = *smf;
+                          let size = file.len() as u64;
+                          let modified = header::HttpDate::from(mod_time);
+                          let mut res = Response::new()
+                              .with_header(header::ContentLength(size))
+                              .with_header(header::LastModified(modified));
+                          
+                          if method == Method::Get {
+                              res.set_body(Body::from(file.clone()));
+                          }
+                          info!("{:>20} - 200 - {}", reqaddr, path_str);
+                          res
                     }
-                }
-            }
-        })
-    }
+                }))
+        }
 }
 
 #[derive(Clone)]

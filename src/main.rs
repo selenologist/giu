@@ -121,7 +121,8 @@ fn main(){
     let (rebuilder, invalidation_rx) = rebuilder::launch_thread();
     let (invalidation_chain, invalidation_rx) =
         InvalidationReceiverChain::with_daisy(invalidation_rx);
-    let http      = http::launch_thread(invalidation_chain);
+    let cache     = filecache::FileCache::new(4, invalidation_chain);
+    let http      = http::launch_thread(cache);
     let websocket = websocket::launch_thread();    
     let reloader  = reloader::launch_thread(invalidation_rx.into());
     debug!("Threads launched, waiting for join");

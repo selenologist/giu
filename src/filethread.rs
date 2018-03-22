@@ -1,34 +1,34 @@
 use std::io;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::cell::Cell;
-use std::sync::Arc;
+use std::path::{PathBuf};
+use std::sync::{Arc, Mutex};
 use std::fs::File;
 use std::time::SystemTime;
 use std::thread;
 use std::thread::JoinHandle;
+use std::borrow::Borrow;
 
-use futures::{Future, future, Sink, Stream};
-use futures::future::Either;
+use futures::{Future, Sink, Stream};
 use futures::sync::mpsc::channel as bounded_channel; // rename this because defaulting to bounded is dumb
 use futures::sync::mpsc::Sender as BoundedSender;
 use futures::sync::mpsc::Receiver as BoundedReceiver;
 use futures::sync::oneshot::{Receiver as OneshotReceiver,
                              Sender as OneshotSender,
-                             channel as oneshot_channel};
+                             channel as oneshot_channel,
+                             Canceled};
 
 pub type InMemoryFile = (SystemTime, Vec<u8>);
 pub type SharedMemoryFile = Arc<InMemoryFile>;
 
-pub type RequestPath = PathBuf;
+pub type RequestPath = Arc<PathBuf>;
 type Request     = (RequestPath, OneshotSender<Response>);
-type Response    = io::Result<SharedMemoryFile>;
+pub type Response    = io::Result<SharedMemoryFile>;
 pub type FileThreadResult = OneshotReceiver<Response>; // this is what the fetch futures are, but type aliases cannot actually be used as traits
 
 struct FileThreadState(BoundedReceiver<Request>);
 
 impl FileThreadState{
-    fn get_file(path: &Path) -> Response{
+    fn get_file(path: &PathBuf) -> Response{
         trace!("Fetching {}", path.to_str().unwrap());
         let mut file = File::open(path)?;
         let metadata = file.metadata()?;
@@ -45,7 +45,7 @@ impl FileThreadState{
         let task = self.0.for_each(
             move |req| {
                 let (path, resp) = req;
-                resp.send(Self::get_file(&path))
+                resp.send(Self::get_file(path.borrow()))
                     .unwrap();
                 Ok(())
             }
@@ -80,7 +80,7 @@ pub struct FileThread{
 
 pub struct FileThreadPool{
     threads:        Vec<FileThread>,
-    next_thread:    Cell<usize>, // used for round-robin selection of file threads
+    next_thread:    Mutex<usize>, // used for round-robin selection of file threads
 }
 
 impl FileThreadPool{
@@ -88,26 +88,30 @@ impl FileThreadPool{
         let threads = (0..n_threads).map(FileThread::new).collect();
         FileThreadPool{
             threads,
-            next_thread: Cell::new(0)
+            next_thread: Mutex::new(0)
         }
     }
 
-    pub fn fetch(&self, path: PathBuf)
-        -> impl Future<Item=SharedMemoryFile, Error=io::Error> // basically Future<FileThreadResult>
+    pub fn fetch(&self, path: RequestPath)
+        -> impl Future<Item=Response, Error=Canceled>
     {
         // access the IO thread pool in a round-robin fashion
-        let current_thread = self.next_thread.get();
-        let next_thread =
-            current_thread.checked_add(1) // usize would have overflowed to zero anyway
-                          .unwrap_or(0); // but ensure it definitely safely overflows
-        if next_thread >= self.threads.len(){
-            // if the next thread exceeds the number of threads, the next thread is zero
-            self.next_thread.set(0);
-        }
-        else{
-            // otherwise, it's next_thread
-            self.next_thread.set(next_thread);
-        }
+        let current_thread = {
+            let mut thread  = self.next_thread.lock().unwrap();
+            let current = *thread;
+            let next    =
+                current.checked_add(1) // usize would have overflowed to zero anyway
+                       .unwrap_or(0);  // but ensure it definitely safely overflows
+            if next >= self.threads.len(){
+                // if the next thread exceeds the number of threads, the next thread is zero
+                *thread = 0;
+            }
+            else{
+                // otherwise, it's next_thread
+                *thread = next
+            }
+            current
+        };
 
         let req_out = &self.threads[current_thread].req_out;
        
@@ -116,7 +120,7 @@ impl FileThreadPool{
             .clone() // easier to clone than to &mut self
             .send((path, file_out))
             .map_err(|_| panic!())
-            .map(move |_|{
+            .and_then(move |_|{
                 file_in
             })
     }

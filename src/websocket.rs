@@ -163,7 +163,7 @@ impl FrontendClient{
 
     fn on_command(&self, out: &Sender, store: &GraphStore,
                   command: &Command) -> Result<Response> {
-        use graph::Command::*;
+        //use graph::Command::*;
        
         if let Some(common) = ClientCommon::on_command(out, store, command, self.graph, ClientType::Frontend)?{
             return Ok(common);
@@ -304,7 +304,6 @@ impl Handler for ServerHandler{
     fn on_close(&mut self, code: CloseCode, reason: &str){
         use self::ClientState::*;
         trace!("Closing connection {:?} because {:?} {}", self.addr, code, reason);
-        self.out.close(code);
         match self.state{
             Backend(BackendClient{ graph }) |
             Frontend(FrontendClient{ graph }) => {

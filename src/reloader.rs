@@ -1,9 +1,9 @@
 use ws::{Handler, Factory, Sender, Handshake, Request, Response as WsResponse, CloseCode, WebSocket};
 use ws::{Result as WsResult};
+use futures::Stream;
 
 use std::thread;
 use std::thread::{JoinHandle};
-use std::sync::mpsc::RecvError;
 
 use rebuilder::InvalidationReceiverChain;
 use log::Level;
@@ -63,15 +63,15 @@ pub fn launch_thread(invalidation_rx: InvalidationReceiverChain)
             let broadcaster = server.broadcaster();
             // lazily spawn another thread to handle the mpsc events
             let handle = thread::Builder::new()
-                .name("reloader bcast".into())
-                .spawn(move || -> Result<(), RecvError>{
-                    loop{
-                        let p = invalidation_rx.recv()?;
-                        trace!("got {}", p);
-                        if p.ends_with("main.js"){
-                            broadcaster.send("Reload").unwrap();
-                        }
-                    }
+                .name("reload bcast".into())
+                .spawn(move || {
+                    invalidation_rx.recv()
+                        .map(move |p| {
+                            let p = p.unwrap();
+                            if p.ends_with("main.js"){
+                                broadcaster.send("Reload").unwrap();
+                            }
+                        }).wait().last().unwrap()
                 }).unwrap();
             server.listen(listen_addr).unwrap();
             let join = handle.join();

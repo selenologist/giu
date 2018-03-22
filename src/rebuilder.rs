@@ -1,47 +1,69 @@
 use notify::{DebouncedEvent, Watcher, RecursiveMode, watcher};
 use subprocess::{Exec, ExitStatus};
 
-use std::sync::mpsc::{channel, Sender, Receiver, TryRecvError, RecvError};
+use futures::sync::mpsc::{channel as bounded_channel,
+                          Sender as BoundedSender,
+                          Receiver as BoundedReceiver,
+                          SendError as BoundedSendError};
+use futures::{future, future::Either, Future, Stream, Sink, Poll, Async};
+use std::sync::mpsc::{channel as std_channel};
 use std::time::Duration;
 use std::io;
 use std::fs;
-use std::path::{Path};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::thread::{JoinHandle};
-use std::mem::replace;
+use std::sync::Arc;
 
-pub type InvalidationPath = String;
-pub type InvalidationReceiver = Receiver<InvalidationPath>;
-pub type InvalidationSender = Sender<InvalidationPath>;
+pub type InvalidationPath     = Arc<PathBuf>;
+pub type InvalidationReceiver = BoundedReceiver<InvalidationPath>;
+pub type InvalidationSender   = BoundedSender<InvalidationPath>;
+type BoundedRecvError = ();
+pub type InvalidationSendError = BoundedSendError<InvalidationPath>;
+pub type InvalidationRecvError = BoundedRecvError;
+
+static INVALIDATION_CHANNEL_SIZE: usize = 16;
 
 pub struct InvalidationReceiverChain{
     invalidation_rx: InvalidationReceiver,
     daisy_tx: Option<InvalidationSender>
 }
 
-// repeats T on a hidden Sender when it goes out of scope;
+// repeats T along the daisy chain after the first receiver is done doing whatever it needs to do
 // provides access to &T via deref and get
-// Option<T> so we can move the original value out on Drop
-pub struct RepeatAfter<T>(Option<T>, Option<Sender<T>>);
+// first receiver must call .do_repeat() when ready for repeat
+#[must_use]
+pub struct RepeatAfter<T>(T, Option<BoundedSender<T>>);
 
-impl<T> RepeatAfter<T>{
+impl<T: ::std::fmt::Debug> RepeatAfter<T>{
     pub fn get(&self) -> &T{
-        self.0.as_ref().unwrap()
+        &self.0
     }
     pub fn get_mut(&mut self) -> &mut T{
-        self.0.as_mut().unwrap()
+        &mut self.0
     }
-}
-
-impl<T> ::std::ops::Drop for RepeatAfter<T>{
-    fn drop(&mut self){
-        if let Some(ref tx) = self.1{
-            tx.send(replace(&mut self.0, None).unwrap()).unwrap();
+    pub fn do_repeat(self) -> impl Future<Item=(), Error=BoundedSendError<T>>{
+        if let Some(tx) = self.1{
+            trace!("repeatafter called {:?}", self.0);
+            Either::A(tx.send(self.0).map(|_| ()))
+        }
+        else{
+            Either::B(future::ok(()))
         }
     }
+    pub fn do_repeat_block(self) -> Result<(), BoundedSendError<T>>{
+        if let Some(tx) = self.1{
+            trace!("repeatafter called {:?}", self.0);
+            tx.send(self.0).map(|_| ()).wait()
+        }
+        else{
+            Ok(())
+        }
+    }
+
 }
 
-impl<T> ::std::ops::Deref for RepeatAfter<T>{
+impl<T: ::std::fmt::Debug> ::std::ops::Deref for RepeatAfter<T>{
     type Target = T;
     fn deref(&self) -> &Self::Target{
         self.get()
@@ -52,7 +74,7 @@ impl InvalidationReceiverChain{
     pub fn with_daisy(invalidation_rx: InvalidationReceiver)
         -> (InvalidationReceiverChain, InvalidationReceiver)
     {
-        let (daisy_tx, daisy_rx) = channel();
+        let (daisy_tx, daisy_rx) = bounded_channel(INVALIDATION_CHANNEL_SIZE);
         (InvalidationReceiverChain{
             invalidation_rx,
             daisy_tx: Some(daisy_tx)
@@ -67,31 +89,51 @@ impl InvalidationReceiverChain{
             daisy_tx: None
         }
     }
-    pub fn try_recv(&self)  // immediate repeat
-        -> Result<InvalidationPath, TryRecvError>
+    pub fn try_recv(&mut self)  // repeat before returning value
+        -> Poll<impl Future<Item=InvalidationPath, Error=InvalidationSendError>, InvalidationRecvError>
     {
-        let p = self.invalidation_rx.try_recv()?;
-        if let Some(ref tx) = self.daisy_tx {
-            tx.send(p.clone()).unwrap();
+        let p: InvalidationPath = match self.invalidation_rx.poll()?{
+            Async::Ready(Some(path)) => path,
+            _ => return Ok(Async::NotReady)
+        };
+        if let Some(tx) = self.daisy_tx.clone() {
+            Ok(Async::Ready(
+                    Either::A(tx.send(p.clone()).map(move |_| p))))
         }
-        Ok(p)
-    }
-    pub fn recv(&self) -> Result<InvalidationPath, RecvError>{ // immediate repeat
-        let p = self.invalidation_rx.recv()?;
-        if let Some(ref tx) = self.daisy_tx {
-            tx.send(p.clone()).unwrap();
+        else{
+            Ok(Async::Ready(
+                    Either::B(future::ok(p))))
         }
-        Ok(p)
     }
-    pub fn recv_repeat_after(&self) // repeat after RepeatAfter is dropped
-        -> Result<RepeatAfter<InvalidationPath>, RecvError>{
-        let p = self.invalidation_rx.recv()?;
-        Ok(RepeatAfter(Some(p), self.daisy_tx.clone()))
+    pub fn recv(self)
+        -> impl Stream<Item=Result<InvalidationPath, InvalidationSendError>, Error=InvalidationRecvError>
+    { // repeat before returning value
+        let daisy_tx = self.daisy_tx;
+        self.invalidation_rx
+            .map(move |p: InvalidationPath|
+                 if let Some(tx) = daisy_tx.clone() {
+                     tx.send(p.clone())
+                       .map(move |_| p) // attach path to successful sends
+                       .wait()
+                 }
+                 else{
+                     Ok(p)
+                 }
+            )
     }
-    pub fn try_recv_repeat_after(&self) // repeat after RepeatAfter is dropped
-        -> Result<RepeatAfter<InvalidationPath>, TryRecvError>{
-        let p = self.invalidation_rx.try_recv()?;
-        Ok(RepeatAfter(Some(p), self.daisy_tx.clone()))
+    pub fn recv_repeat_after(self) // repeat after RepeatAfter is dropped
+        -> impl Stream<Item=RepeatAfter<InvalidationPath>, Error=InvalidationRecvError>{
+        let (rx, daisy_tx) = (self.invalidation_rx, self.daisy_tx);
+        rx.map(move |p: InvalidationPath|
+               RepeatAfter(p, daisy_tx.clone()))
+    }
+    pub fn try_recv_repeat_after(&mut self) // repeat after RepeatAfter is dropped
+        -> Poll<RepeatAfter<InvalidationPath>, InvalidationRecvError>{
+        let p = match self.invalidation_rx.poll()?{
+            Async::Ready(Some(path)) => path,
+            _ => return Ok(Async::NotReady)
+        };
+        Ok(Async::Ready(RepeatAfter(p, self.daisy_tx.clone())))
     }
 }
 
@@ -151,30 +193,30 @@ fn recursive_find(path: &Path) -> io::Result<()>{
     Ok(())
 }
 
-fn handle_event(event: DebouncedEvent, invalidation_tx: &InvalidationSender){
+fn handle_event(event: DebouncedEvent, invalidation_tx: &mut InvalidationSender){
     use self::DebouncedEvent::*;
 
-    let broadcast = |s| invalidation_tx.send(s).unwrap();
+    let broadcast = move |s| invalidation_tx.clone().send(Arc::new(s)).wait().unwrap();
+    let s = |p: &PathBuf| -> String {
+        let s = p.to_str().unwrap_or("<nonunicode>"); // get PathBuf as string or "<nonunicode>" on unicode conversion failure
+        s.into()
+    };
     match event{
         Create(p) |
         Write(p)  => {
-            let s = String::from(p.to_str().unwrap());
-            info!("File {} modified", s);
+            info!("File {} modified", s(&p));
             check(&p);
-            broadcast(s);
+            broadcast(p);
         },
         Rename(old, new) => {
-            let s1 = String::from(old.to_str().unwrap());
-            let s2 = String::from(new.to_str().unwrap());
-            info!("File {} renamed to {}", s1, s2);
-            broadcast(s1);
+            info!("File {} renamed to {}", s(&old), s(&new));
+            broadcast(old);
             check(&new);
-            broadcast(s2);
+            broadcast(new);
         },
         Remove(p) => {
-            let s = String::from(p.to_str().unwrap());
-            info!("File {} removed", s);
-            broadcast(s);
+            info!("File {} removed", s(&p));
+            broadcast(p);
         }
         _ => ()
     }
@@ -182,7 +224,7 @@ fn handle_event(event: DebouncedEvent, invalidation_tx: &InvalidationSender){
 
 pub fn launch_thread() -> (JoinHandle<()>, InvalidationReceiver){
     // must be Arc<Mutex<Bus>> so that InvalidationReceiverMaker can add more receivers
-    let (invalidation_tx, invalidation_rx) = channel();
+    let (mut invalidation_tx, invalidation_rx) = bounded_channel(INVALIDATION_CHANNEL_SIZE);
     
     let handle = thread::Builder::new()
         .name("rebuilder".into())
@@ -191,7 +233,7 @@ pub fn launch_thread() -> (JoinHandle<()>, InvalidationReceiver){
         trace!("Finding and processing existing .coffee files");
         recursive_find(Path::new(watch_path)).unwrap();
 
-        let (watcher_tx, watcher_rx) = channel();
+        let (watcher_tx, watcher_rx) = std_channel();
 
         let mut watcher = watcher(watcher_tx, Duration::from_secs(1)).unwrap();
 
@@ -199,7 +241,7 @@ pub fn launch_thread() -> (JoinHandle<()>, InvalidationReceiver){
 
         loop{
             match watcher_rx.recv(){
-                Ok(ev) => handle_event(ev, &invalidation_tx),
+                Ok(ev) => handle_event(ev, &mut invalidation_tx),
                 Err(e) => error!("watch error: {:?}", e)
             }
         }
