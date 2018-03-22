@@ -13,9 +13,9 @@ graph.data  = {}
 graph.id_to_idx = {}
 window.graph_data = graph
 
-rebuildLinks = false
-rebuildNodes = false
-rebuild = false # set by d3setup, call to update after modifying state
+updateLinks = false
+updateNodes = false
+update = false # set by d3setup, call to update after modifying state
 
 getPosition = (sel) ->
     r = sel.node().getBoundingClientRect()
@@ -42,57 +42,65 @@ getDataAsString = (id) ->
             when "function"
                 "[wtf why is a function in graph.data]"
 
-drag  = (n) ->
-    n = d.append("path")
-    console.log('d', n)
+mkDrag  = (n) -> (d) ->
     x = d3.event.x
     y = d3.event.y
+    l = this.drag or {}
+    console.log('n', n)
     switch d3.event.type
         when "start"
-            n.start = {x,y}
-            n.end   = {x,y}
+            rect = n.selector.node().getBoundingClientRect()
+            console.log('box', rect)
+            l.start = {x: rect.x, y: rect.y}
+            l.end = {x: x, y: y}
+            this.dragpath = d3.select('#links').append("path").classed('link', true)
         when "drag"
-            n.end = {x,y}
-        when "stop"
-            n.remove()
-    n.attr("d",
-        "M" + n.start.x + ',' + n.start.y +
-        "L" + n.end.x   + ',' + n.end.y)
+            l.end = {x: x, y: y}
+        when "end"
+            this.dragpath.remove()
+            l = null
+    this.dragpath.attr("d",
+        "M" + l.start.x + ',' + l.start.y +
+        "L" + l.end.x   + ',' + l.end.y)
+    this.drag = l
 
 addPortsToNode = (g, node_width, port_list, style) ->
     size = style.padding
     [lcount, rcount] = [0,0] # number of ports on left and right side
+    yspacing = 16
+    yoffset  = yspacing
     for _, port of port_list
-        yspacing = 20
-        [color, cx, cy] =
+        [cx, cy] =
             switch port.type
                 when "InPort"
-                    ["blue", size/2, (lcount++) * yspacing]
+                    [size/2, (lcount++) * yspacing]
                 when "OutPort"
-                    ["red", node_width-size/2, (rcount++) * yspacing]
+                    [node_width-size/2, (rcount++) * yspacing]
                 else
-                    ["green", node_width-size/2, (rcount++) * yspacing]
+                    [node_width-size/2, (rcount++) * yspacing]
         port.selector =
             g.append("circle")
+             .classed(port.type, true)
              .attr("cx", cx)
-             .attr("cy", cy)
+             .attr("cy", cy+yoffset)
              .attr("r", size)
-             .attr("fill", color)
-             .call((d) ->
-                 n = d
-                 d3.drag()
-                    .on("start", -> drag(n))
-                    .on("drag",  -> drag(n))
-                    .on("end",   -> drag(n)))
         port.parent_g = g
+
+        drag = mkDrag(port)
+        port.selector.call(d3.drag()
+                   .on("start", drag)
+                   .on("drag",  drag)
+                   .on("end",   drag))
+
     g
 
 buildLabelled = (g, node, style) ->
     label = g.append("text")
-        .attr("fill", "red")
+        .classed("label", true)
         .attr("x", style.padding)
         .text(getDataAsString(node.data))
-    label.attr("y", -> label.node().getBBox().height)
+    label.attr("y", -> label.node().getBBox().height*1.1)
+    node.label = label
 
 buildNodeType = {
     Label:    buildLabelled
@@ -101,7 +109,7 @@ buildNodeType = {
 
 buildNode = (g, node) ->
     style = {}
-    style.padding = 4
+    style.padding = 5
 
     console.log('building', node)
 
@@ -115,20 +123,20 @@ buildNode = (g, node) ->
     width  = box.width+style.padding*2
     height = box.height+style.padding*2
     noderect.attr("width",  width)
-            .attr("height", height)
+    noderect.attr("height", height)
 
     portlist = Object.filter(graph.ports, (p) -> p.parent == node)
     if portlist?
         g = addPortsToNode(g, width, portlist, style)
-    g.attr("transform", (d) ->
-        [d.x, d.y] = [200, 200]
-        "translate(" + d.x + "," + d.y + ")")
+        noderect.attr("height",
+            Math.max(height, g.node().getBBox().height+style.padding*2))
     g
 
 addNode = (parent, node_id, node) ->
+    new_node = {node: node_id, type: node.type, data: node.data}
     if node.nodes?
         console.log('adding container', node_id)
-        new_node = {node: node_id, type: node.type, data: node.data}
+        [new_node.x, new_node.y] = [500, 500]
         parent = parent ? new_node
         enumerateNodes(parent, node.nodes)
         graph.nodes.push new_node
@@ -145,7 +153,6 @@ addNode = (parent, node_id, node) ->
             }
         else
             console.log('adding regular node', node_id)
-            new_node = {node: node_id, type: node.type, data: node.data}
             if parent
                 parent.nodes.push new_node
             else
@@ -181,58 +188,62 @@ d3setup = ->
         .attr('width',  "100%")
         .attr('height', "100%")
 
-    nodegroup = svg.append("g")
-        .attr("class", "nodes")
-        .selectAll(".nodes")
-   
-    tick = ->
-        # update nodes with recomputed position
-        for _, d of graph.nodes
-          d3.select("g#" + d.node)
-            .attr("transform", ->
-                "translate(" + d.x + "," + d.y + ")")
-        return
+    nodegroup =
+        svg.append("g")
+           .attr("id", "nodes")
+           .selectAll("g")
 
-    rebuildNodes = ->
-        node = nodegroup
-            .data(graph.nodes)
-            .enter().append("g")
+    linkgroup =
+        svg.append("g")
+           .attr("id", "links")
+           .selectAll("path")
+   
+    nodes = false
+    updateNodes = ->
+        node = nodegroup.data(graph.nodes)
+
+        node.exit()
+            .remove()
+
+        nodes = node.enter()
+            .append("g")
             .attr("id", (d) -> d.node)
+            .classed("node", true)
             .each((d) ->
                 g = d3.select(this)
                 buildNode(g, d))
-        simulation = d3.forceSimulation(graph.nodes)
-            .force('charge', d3.forceManyBody())
-            .force('center', d3.forceCenter(300, 300))
-            .on('tick', tick)
-        
+   
+    links = false
+    updateLinks = ->
+        link = linkgroup.data(graph.links)
 
-    rebuildLinks = ->
-        linkgroup = svg.append("g")
-            .attr("class", "links")
-            .selectAll("path")
+        link.exit().remove()
 
-        links = linkgroup
-                .data(graph.links, (d) ->
-                    x = d.source + "#" + d.target
-                    console.log('x', x)
-                    x)
-
-        links.exit().remove()
-
-        links.enter()
+        links = link.enter()
              .append("path")
-             .attr("stroke", "yellow")
-             .attr("d", (d) ->
-                "M" + getPosition(graph.ports[d.source].selector) +
-                "L" + getPosition(graph.ports[d.target].selector))
+             .classed("link", true)
 
-        window.setTimeout(rebuildLinks, 500)
-
-    rebuild = ->
-        rebuildNodes()
-        rebuildLinks()
-    
+    simulation = false
+    update = ->
+        updateNodes()
+        updateLinks()
+        if !simulation
+            simulation =
+                d3.forceSimulation(graph.nodes)
+                  .force('charge', d3.forceManyBody()
+                                     .strength(-100))
+                  .force('radial', d3.forceRadial(300, 200, 200)
+                                     .strength(0.5))
+                  .on('tick', ->
+                      # update nodes with recomputed position
+                      nodes.attr("transform", (d) -> "translate(" + d.x + "," + d.y + ")")
+                      nodes.datum().label?.text((d) -> getDataAsString(d.data))
+                      
+                      links.attr("d", (d) ->
+                                  "M" + getPosition(graph.ports[d.source].selector) +
+                                  "L" + getPosition(graph.ports[d.target].selector))
+                  )
+ 
 encode = (data) ->
     # msgpack.encode data
     JSON.stringify(data)
@@ -263,11 +274,13 @@ frontend = ->
         graph.data = c.graph.data
         if num_nodes != 0
             enumerateNodes(null, c.graph.nodes)
-            if !rebuildNodes
-                d3setup()
             for source, target_ports of c.graph.links
                 for _, target of target_ports
                     addLink(source, target)
+        update()
+
+    set_data = (c) ->
+        graph.data[c.id] = c.value
 
     add_link = (c) ->
         addLink(c.source, c.target)
@@ -277,6 +290,7 @@ frontend = ->
 
     command = {
         SetGraph: set_graph,
+        SetData:  set_data,
         AddLink:  add_link,
         DelLink:  del_link,
     }
@@ -310,13 +324,11 @@ frontend = ->
             p(r)
         else
             process_unknown(r)
-        if rebuild
-            rebuild()
         main_loop
     
     fatal = (r) ->
         console.log end + ' fatal ', r
-        this
+        fatal
 
     get_graph_list = (r) ->
         if r.list
@@ -340,6 +352,8 @@ frontend = ->
         payload = decode e.data
         next = next(payload)
 
+    d3setup()
+
 backend = ->
     ws = new WebSocket('ws://127.0.0.1:3001', 'selenologist-node-editor')
     #ws.binaryType = 'arraybuffer'
@@ -348,11 +362,18 @@ backend = ->
 
     fatal = (r) ->
         console.log end + ' fatal ', r
-        this
+        fatal
 
-    main_loop= (r) ->
+    main_loop = (r) ->
         console.log(end + ' loop', r)
         main_loop
+
+    set_data = (key, value) ->
+        send {
+            type: "SetData",
+            id:    key,
+            value: {val: value}
+        }
 
     send_graph = (r) ->
         send {
@@ -361,7 +382,7 @@ backend = ->
                 nodes: {
                     "TestNode": {
                         type: "Labelled"
-                        data: "TestLabelData"
+                        data: "TestLabelData",
                         nodes: {
                             "TestNodeOut": {
                                 type: "OutPort"
@@ -370,14 +391,65 @@ backend = ->
                                 type: "InPort"
                             }
                         }
+                    },
+                    "2ndNode": {
+                        type: "Labelled",
+                        data: "Time",
+                        nodes: {
+                            "2ndNodeIn": {
+                                type: "InPort"
+                            }
+                        }
                     }
+                    "AnotherNode": {
+                        type: "Labelled",
+                        data: "Octopus",
+                        nodes: {
+                            "Octopus1": {
+                                type: "OutPort"
+                            },
+                            "Octopus2": {
+                                type: "OutPort"
+                            },
+                            "Octopus3": {
+                                type: "BiPort"
+                            },
+                            "Octopus4": {
+                                type: "OutPort"
+                            },
+                            "Octopus5": {
+                                type: "BiPort"
+                            },
+                            "Octopus6": {
+                                type: "OutPort"
+                            },
+                            "Octopus7": {
+                                type: "OutPort"
+                            },
+                            "Octopus8": {
+                                type: "OutPort"
+                            },
+                        }
+                    }
+
                 }
                 links: {
-                    "TestNodeOut": ["TestNodeIn"]
+                    "TestNodeOut": ["2ndNodeIn", "Octopus2", "Octopus7"],
+                    "Octopus1": ["TestNodeIn"]
+                    "Octopus3": ["TestNodeIn"]
+                    "Octopus4": ["2ndNodeIn"]
+                    "Octopus5": ["2ndNodeIn"]
                 }
-                data:  {TestLabelData: {val: "Test"}}
+                data:  {
+                    TestLabelData: {val: "Test"},
+                    Time: {val: (new Date()).toLocaleTimeString()},
+                    Octopus: {val: "Octopus"}
+                }
             }
         }
+        window.setInterval(
+            -> (set_data("Time", (new Date()).toLocaleTimeString())),
+            5000)
         main_loop
        
 
@@ -419,13 +491,20 @@ backend = ->
 reloader = ->
     ws = new WebSocket('ws://127.0.0.1:3002', 'selenologist-minimal-reloader')
     
-    reload = (c) ->
+    reload = ->
         location.reload(true)
     
     ws.onmessage = (e) ->
         if e.data == "Reload"
             reload()
         # yup that's it
+
+    # also make ctrl-s reload the page
+    d3.select("body")
+      .on("keydown", ->
+          if d3.event.ctrlKey && (d3.event.key == 's')
+              d3.event.preventDefault()
+              reload())
 
 reloader()
 backend()

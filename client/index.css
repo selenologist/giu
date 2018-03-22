@@ -5,4 +5,28 @@ svg {
     user-select: none;
 }
 
+.link{
+    stroke: magenta;
+    stroke-width: 3;
+    opacity: 0.5;
+}
 
+.label{
+    fill: red;
+    font-family: monospace;
+}
+
+.InPort{
+    fill: blue;
+    opacity: 0.8;
+}
+
+.OutPort{
+    fill: red;
+    opacity: 0.8;
+}
+
+.BiPort{
+    fill: green;
+    opacity: 0.8;
+}

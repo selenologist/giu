@@ -230,7 +230,7 @@ pub struct GraphList{
 pub enum Command{
     AddLink {source: PortId, target: PortId},
     DelLink {source: PortId, target: PortId},
-    SetData {id:   DataId,  value: DataValue},
+    SetData {id:    DataId,   value: DataValue},
     SetGraph{graph: Rc<RefCell<GraphData>>},
     FrontendAttach {id: GraphId},
     BackendAttach  {id: Option<GraphId>},

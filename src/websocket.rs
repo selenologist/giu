@@ -206,6 +206,13 @@ impl BackendClient{
                                 encode_update(command.clone())?)?;
                 Response::Ok
             }),
+            SetData{ ref id, ref value } => Ok({
+                trace!("set data {:?} = {:?}", id, value);
+                //store.set_data(self.graph, id, value)?;
+                store.repeat_to(self.graph, client_type.opposite(),
+                                encode_update(command.clone())?)?;
+                Response::Ok
+            }),
             _ => Err(WsError::new(WsErrorKind::Protocol,
                                   format!("Expected Backend command, got {:?}",
                                           command)).into())
