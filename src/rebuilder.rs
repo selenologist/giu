@@ -16,10 +16,18 @@ use std::thread::{JoinHandle};
 use std::sync::Arc;
 
 pub type InvalidationPath     = Arc<PathBuf>;
-pub type InvalidationReceiver = BoundedReceiver<InvalidationPath>;
-pub type InvalidationSender   = BoundedSender<InvalidationPath>;
+
+#[derive(Clone)]
+pub enum InvalidationEvent{
+    Added(InvalidationPath),
+    Removed(InvalidationPath),
+    Modified(InvalidationPath),
+    Renamed(InvalidationPath, InvalidationPath)
+}    
+pub type InvalidationReceiver = BoundedReceiver<InvalidationEvent>;
+pub type InvalidationSender   = BoundedSender<InvalidationEvent>;
 type BoundedRecvError = ();
-pub type InvalidationSendError = BoundedSendError<InvalidationPath>;
+pub type InvalidationSendError = BoundedSendError<InvalidationEvent>;
 pub type InvalidationRecvError = BoundedRecvError;
 
 static INVALIDATION_CHANNEL_SIZE: usize = 16;
@@ -34,8 +42,13 @@ pub struct InvalidationReceiverChain{
 // first receiver must call .do_repeat() when ready for repeat
 #[must_use]
 pub struct RepeatAfter<T>(T, Option<BoundedSender<T>>);
+impl<T: Clone> RepeatAfter<T>{
+    pub fn get_owned(&mut self) -> T{ // ideally would behave like Cow and clone only when self.1.is_some
+        self.0.clone()
+    }
+}
 
-impl<T: ::std::fmt::Debug> RepeatAfter<T>{
+impl<T> RepeatAfter<T>{
     pub fn get(&self) -> &T{
         &self.0
     }
@@ -44,7 +57,6 @@ impl<T: ::std::fmt::Debug> RepeatAfter<T>{
     }
     pub fn repeat(self) -> impl Future<Item=Option<BoundedSender<T>>, Error=BoundedSendError<T>>{
         if let Some(tx) = self.1{
-            trace!("repeatafter called {:?}", self.0);
             Either::A(tx.send(self.0).map(|s| Some(s)))
         }
         else{
@@ -59,7 +71,6 @@ impl<T: ::std::fmt::Debug> RepeatAfter<T>{
             Ok(None)
         }
     }
-
 }
 
 impl<T: ::std::fmt::Debug> ::std::ops::Deref for RepeatAfter<T>{
@@ -89,9 +100,9 @@ impl InvalidationReceiverChain{
         }
     }
     pub fn try_recv(&mut self)  // repeat before returning value
-        -> Poll<impl Future<Item=InvalidationPath, Error=InvalidationSendError>, InvalidationRecvError>
+        -> Poll<impl Future<Item=InvalidationEvent, Error=InvalidationSendError>, InvalidationRecvError>
     {
-        let p: InvalidationPath = match self.invalidation_rx.poll()?{
+        let p: InvalidationEvent = match self.invalidation_rx.poll()?{
             Async::Ready(Some(path)) => path,
             _ => return Ok(Async::NotReady)
         };
@@ -105,11 +116,11 @@ impl InvalidationReceiverChain{
         }
     }
     pub fn recv(self)
-        -> impl Stream<Item=Result<InvalidationPath, InvalidationSendError>, Error=InvalidationRecvError>
+        -> impl Stream<Item=Result<InvalidationEvent, InvalidationSendError>, Error=InvalidationRecvError>
     { // repeat before returning value
         let daisy_tx = self.daisy_tx;
         self.invalidation_rx
-            .map(move |p: InvalidationPath|
+            .map(move |p: InvalidationEvent|
                  if let Some(tx) = daisy_tx.clone() {
                      tx.send(p.clone())
                        .map(move |_| p) // attach path to successful sends
@@ -121,13 +132,13 @@ impl InvalidationReceiverChain{
             )
     }
     pub fn recv_repeat_after(self) // repeat after RepeatAfter is dropped
-        -> impl Stream<Item=RepeatAfter<InvalidationPath>, Error=InvalidationRecvError>{
+        -> impl Stream<Item=RepeatAfter<InvalidationEvent>, Error=InvalidationRecvError>{
         let (rx, daisy_tx) = (self.invalidation_rx, self.daisy_tx);
-        rx.map(move |p: InvalidationPath|
+        rx.map(move |p: InvalidationEvent|
                RepeatAfter(p, daisy_tx.clone()))
     }
     pub fn try_recv_repeat_after(&mut self) // repeat after RepeatAfter is dropped
-        -> Poll<RepeatAfter<InvalidationPath>, InvalidationRecvError>{
+        -> Poll<RepeatAfter<InvalidationEvent>, InvalidationRecvError>{
         let p = match self.invalidation_rx.poll()?{
             Async::Ready(Some(path)) => path,
             _ => return Ok(Async::NotReady)
@@ -194,27 +205,32 @@ fn recursive_find(path: &Path) -> io::Result<()>{
 
 fn handle_event(event: DebouncedEvent, invalidation_tx: &mut InvalidationSender){
     use self::DebouncedEvent::*;
+    use self::InvalidationEvent::*;
 
-    let broadcast = move |s| invalidation_tx.clone().send(Arc::new(s)).wait().unwrap();
+    let broadcast = move |s| invalidation_tx.clone().send(s).wait().unwrap();
     fn to_str<'a>(p: &'a PathBuf) -> &'a str{
         p.to_str().unwrap_or("<nonunicode>")
     }
+    // XXX maybe do check after broadcast?
     match event{
-        Create(p) |
+        Create(p) => {
+            info!("File {} added", to_str(&p));
+            check(&p);
+            broadcast(Added(Arc::new(p)));
+        },
         Write(p)  => {
             info!("File {} modified", to_str(&p));
             check(&p);
-            broadcast(p);
+            broadcast(Modified(Arc::new(p)));
         },
         Rename(old, new) => {
             info!("File {} renamed to {}", to_str(&old), to_str(&new));
-            broadcast(old);
             check(&new);
-            broadcast(new);
+            broadcast(Renamed(Arc::new(old), Arc::new(new)));
         },
         Remove(p) => {
             info!("File {} removed", to_str(&p));
-            broadcast(p);
+            broadcast(Removed(Arc::new(p)));
         }
         _ => ()
     }

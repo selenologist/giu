@@ -2,7 +2,6 @@
 #![feature(conservative_impl_trait)]
 #![feature(try_trait)]
 #![feature(test)]
-#![feature(associated_type_defaults)]
 #![allow(dead_code)]
 extern crate notify;
 extern crate serde;

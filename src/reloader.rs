@@ -66,12 +66,20 @@ pub fn launch_thread(invalidation_rx: InvalidationReceiverChain)
                 .name("reload bcast".into())
                 .spawn(move || {
                     invalidation_rx.recv()
-                        .map(move |p| {
-                            let p = p.unwrap();
-                            if p.ends_with("main.js") ||
-                               p.ends_with("index.html") ||
-                               p.ends_with("index.css"){
-                                broadcaster.send("Reload").unwrap();
+                        .map(move |e| {
+                            use rebuilder::{InvalidationPath, InvalidationEvent::*};
+                            let e = e.unwrap();
+                            let check = |p: InvalidationPath|
+                                if p.ends_with("main.js") ||
+                                   p.ends_with("index.html") ||
+                                   p.ends_with("index.css"){
+                                    broadcaster.send("Reload").unwrap();
+                                };
+                            match e{
+                                Added(p)       |
+                                Modified(p)    => check(p),
+                                Renamed(.., d) => check(d),
+                                _ => {}
                             }
                         }).wait().last().unwrap()
                 }).unwrap();

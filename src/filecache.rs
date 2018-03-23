@@ -12,7 +12,7 @@ use futures::sync::oneshot::{Sender as OneshotSender,
                              channel as oneshot_channel,
                              Canceled};
 
-use rebuilder::{InvalidationPath, InvalidationReceiverChain, RepeatAfter};
+use rebuilder::{InvalidationEvent, InvalidationPath, InvalidationReceiverChain, RepeatAfter};
 use filethread::{SharedMemoryFile, FileThreadPool, RequestPath};
 
 type Request     = (RequestPath, OneshotSender<Response>);
@@ -78,6 +78,9 @@ fn to_str<'a>(rp: &'a RequestPath) -> &'a str{
     rp.to_str().unwrap_or("<nonunicode>")
 }
 
+// XXX: currently we actually block on file requests, making the io threads pointless.
+// Need to add a mechanism for deferred cache stores where the request future is passed directly to
+// the client.
 impl FileCacheState{
     pub fn new(n_threads: usize,
                invalidation_chain: InvalidationReceiverChain,
@@ -90,9 +93,51 @@ impl FileCacheState{
         }
     }
 
-    pub fn invalidate(store: &mut CacheStore, path: &InvalidationPath){
-       trace!("Removing invalidated file {:?}", path);
-       store.remove(path);
+    pub fn invalidate(store: &mut CacheStore, file: &FileThreadPool, ev: InvalidationEvent){
+        let read = |store: &mut CacheStore, path: InvalidationPath| -> bool {
+            store.remove(&path);
+            let r: Response =
+                file.fetch(path.clone())
+                    .map_err(|e| panic!(e))
+                    .wait().unwrap();
+            if let Ok(smf) = r{
+                store.insert(path, smf);
+                true
+            }
+            else{
+                false
+            }
+        };
+                    
+        use rebuilder::InvalidationEvent::*;
+        match ev{
+            // File modification is frequently reported as creation so just treat it the same here Added(_) => {}, // don't eagerly cache yet
+            Removed(path) => {
+                trace!("Removing invalidated file {:?}", path);
+                store.remove(&path);
+            },
+            Added(path) | Modified(path) => {
+                if !store.contains_key(&path){
+                    return; // don't eagerly cache uncached files
+                }
+                trace!("Updating invalidated file {:?}", path);
+                if !read(store, path.clone()){
+                    trace!("Modified file {:?} now unreadable, removing from cache.", path);
+                    store.remove(&path);
+                }
+            }
+            Renamed(old, new) => {
+                trace!("Renaming {:?} to {:?}", old, new);
+                if let Some(old) = store.remove(&old){
+                    store.insert(new, old);
+                }
+                else{
+                    if !read(store, new.clone()){
+                        trace!("Rename target {:?} not readable, remaining uncached.", new);
+                    }
+                }
+            }
+        }
     }
 
     pub fn get(store: &CacheStore, key: &RequestPath) -> Option<SharedMemoryFile>{
@@ -117,12 +162,12 @@ impl FileCacheState{
         let (mut store, file, chain, req_in) =
             (&mut self.store, self.file_threads, self.invalidation_chain, self.req_in);
  
-        let first = |a: RepeatAfter<InvalidationPath>, store: &mut CacheStore|{
-            Self::invalidate(store, a.get());
+        let first = |a: RepeatAfter<InvalidationEvent>, store: &mut CacheStore, file: &FileThreadPool|{
+            Self::invalidate(store, file, a.get().clone());
             a.repeat_block().unwrap();
         };
 
-        let second = |req: Request, store: &mut CacheStore|{
+        let second = |req: Request, store: &mut CacheStore, file: &FileThreadPool|{
             let (path, resp_out) = req;
             let (cached, store) =
                 (Self::get(&store, &path), store);
@@ -155,8 +200,8 @@ impl FileCacheState{
             .select(req_in.map(|s| FS::Second(s))
                           .map_err(|_| ()))
             .map(|r| { match r{
-                FS::First(a)    => first(a, &mut store),
-                FS::Second(req) => second(req, &mut store)
+                FS::First(a)    => first(a, &mut store, &file),
+                FS::Second(req) => second(req, &mut store, &file)
             }
         }).wait()
           .last()
