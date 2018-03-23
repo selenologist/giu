@@ -115,7 +115,7 @@ impl ClientCommon{
         }
         else{
             let err = format!("GraphId {} does not exist", id);
-            out.send(encode_response(Response::Err(DataValue::from(err.clone())))?)?;
+            out.send(encode_response(Response::Error(DataValue::from(err.clone())))?)?;
             Ok(()) //Err(WsError::new(WsErrorKind::Protocol, err))
         }
     }
@@ -160,7 +160,7 @@ impl FrontendClient{
         )?;
         out.send(
             encode_update(
-                Response::Warn("Test Warning".into())
+                Response::Warning("Test Warning".into())
             )?
         )?;
         Ok(FrontendClient{ graph: id })

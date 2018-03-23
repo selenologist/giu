@@ -315,12 +315,11 @@ frontend = ->
         if r.Command?
             process_command(r.Command)
         else if r.Response?
-            for k, v of r.Response
-                switch k
-                    when "Warn"
-                        process_warn(v)
-                    when "Err"
-                        process_err(v)
+            switch r.Response._
+                when "Warn"
+                    process_warn(r)
+                when "Err"
+                    process_err(r)
         else
             process_unknown(r)
         main_loop

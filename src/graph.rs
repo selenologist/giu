@@ -144,7 +144,7 @@ impl Graph{
             .or_insert(BTreeSet::new());
         let is_new = entry.insert(target_port.clone());
         if !is_new {
-            Response::Warn(DataValue::from(format!(
+            Response::Warning(DataValue::from(format!(
                 "Link {} -> {} already exists",
                 source_port, target_port)))
         }
@@ -297,8 +297,19 @@ impl From<Rc<RefCell<Graph>>> for DataValue{
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "_")]
 pub enum Response{
     Ok,
-    Warn(DataValue),
-    Err(DataValue)
+    Warn{val: DataValue},
+    Err {val: DataValue}
+}
+
+#[allow(non_snake_case)]
+impl Response{
+    pub fn Warning(val: DataValue) -> Response{
+        Response::Warn{ val }
+    }
+    pub fn Error(val: DataValue) -> Response{
+        Response::Err{ val }
+    }
 }
