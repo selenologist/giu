@@ -26,7 +26,6 @@ getPosition = (sel) ->
 getDataAsString = (id) ->
     data = graph.data[id]
     if data?
-        data = data.val
         switch typeof data
             when "string"
                 data
@@ -296,11 +295,11 @@ frontend = ->
     }
 
     process_command = (r) ->
-        c = command[r.val.type]
+        c = command[r._]
         if c?
-            c(r.val)
+            c(r)
         else
-            console.log('unknown command', r.val.type)
+            console.log('unknown command', r._)
 
     process_warn = (r) ->
         console.log(end + ' [warn]', r)
@@ -308,20 +307,20 @@ frontend = ->
     process_err = (r) ->
         console.log(end + ' [err]', r)
 
-    process = {
-        Command: process_command
-        Warn:    process_warn
-        Err:     process_err
-    }
-
     process_unknown = (r) ->
         console.log(end + ' [unknown]', r)
 
     main_loop = (r) ->
         console.log('mainloop', r)
-        p = process[r.type]
-        if p?
-            p(r)
+        if r.Command?
+            process_command(r.Command)
+        else if r.Response?
+            for k, v of r.Response
+                switch k
+                    when "Warn"
+                        process_warn(v)
+                    when "Err"
+                        process_err(v)
         else
             process_unknown(r)
         main_loop
@@ -333,10 +332,9 @@ frontend = ->
     get_graph_list = (r) ->
         if r.list
             console.log(end + ' got graph list', r.list)
-            send {
-                type: "FrontendAttach"
-                id:   0
-            }
+            send
+                _:  "FrontendAttach"
+                id: 0
             main_loop
         else
             fatal(r)
@@ -369,15 +367,14 @@ backend = ->
         main_loop
 
     set_data = (key, value) ->
-        send {
-            type: "SetData",
-            id:    key,
-            value: {val: value}
-        }
+        send
+            _:     "SetData"
+            id:    key
+            value: value
 
     send_graph = (r) ->
-        send {
-            type:  "SetGraph"
+        send
+            _: "SetGraph"
             graph: {
                 nodes: {
                     "TestNode": {
@@ -440,13 +437,12 @@ backend = ->
                     "Octopus4": ["2ndNodeIn"]
                     "Octopus5": ["2ndNodeIn"]
                 }
-                data:  {
-                    TestLabelData: {val: "Test"},
-                    Time: {val: (new Date()).toLocaleTimeString()},
-                    Octopus: {val: "Octopus"}
+                data: {
+                    TestLabelData: "Test",
+                    Time:          (new Date()).toLocaleTimeString(),
+                    Octopus:       "Octopus"
                 }
             }
-        }
         window.setInterval(
             -> (set_data("Time", (new Date()).toLocaleTimeString())),
             5000)
@@ -456,10 +452,9 @@ backend = ->
     get_graph_list = (r) ->
         if r.list
             console.log(end + ' got graph list', r.graphs)
-            send {
-                type: "BackendAttach"
-                id:   0
-            }
+            send
+                _:  "BackendAttach"
+                id: 0
             frontend()
             send_graph()
         else
@@ -506,5 +501,6 @@ reloader = ->
               d3.event.preventDefault()
               reload())
 
-reloader()
-backend()
+window.main = ->
+    reloader()
+    backend()

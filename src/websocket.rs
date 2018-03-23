@@ -158,6 +158,11 @@ impl FrontendClient{
                 }
             )?
         )?;
+        out.send(
+            encode_update(
+                Response::Warn("Test Warning".into())
+            )?
+        )?;
         Ok(FrontendClient{ graph: id })
     }
 
@@ -343,26 +348,6 @@ impl Factory for ServerFactory{
 pub fn launch_thread()
     -> JoinHandle<()>
 {
-    use std::collections::BTreeMap;
-    let d = GraphData{
-        nodes: {
-            let mut map = BTreeMap::new();
-            map.insert("TestLabel".into(), Node::Label{data: "TestData".into()});
-            map.insert("InPortNode".into(), Node::InPort);
-            map.insert("OutPortNode".into(), Node::OutPort);
-            map
-        },
-        links: BTreeMap::new(),
-        data: {
-            let mut map = BTreeMap::new();
-            map.insert("TestData".into(), DataValue::from(String::from("Test Node")));
-            map
-        }
-    };
-
-    let s = serde_json::to_string(&d).unwrap();
-    println!("looks like {}", s);
-
     thread::Builder::new()
         .name("websocket".into())
         .spawn(move || {

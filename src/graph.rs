@@ -226,53 +226,65 @@ pub struct GraphList{
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag="type")]
+#[serde(tag = "_")]
 pub enum Command{
     AddLink {source: PortId, target: PortId},
     DelLink {source: PortId, target: PortId},
-    SetData {id:    DataId,   value: DataValue},
+    SetData {id:     DataId, value:  DataValue},
     SetGraph{graph: Rc<RefCell<GraphData>>},
     FrontendAttach {id: GraphId},
     BackendAttach  {id: Option<GraphId>},
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag="type")]
+// externally tagged (serde default)
 pub enum Update{
-    Command {val: Command},
+    Command(Command),
+    Response(Response)
 }
 
 impl From<Command> for Update{
     fn from(val: Command) -> Self{
-        Update::Command{ val }
+        Update::Command(val)
     }
 }
+
+impl From<Response> for Update{
+    fn from(val: Response) -> Self{
+        Update::Response(val)
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum DataValue{
-    Nil{val: Option<()>},
-    Int{val: i32},
-    Float{val: f32},
-    String{val: String},
-    Graph{val: Rc<RefCell<GraphData>>}
+    Nil,
+    Int(i32),
+    Float(f32),
+    String(String),
+    Graph(Rc<RefCell<GraphData>>)
 }
 
 impl From<()> for DataValue{
     fn from(_val: ()) -> Self{
-        DataValue::Nil{ val: None }
+        DataValue::Nil
     }
 }
 
 impl From<i32> for DataValue{
     fn from(val: i32) -> DataValue{
-        DataValue::Int{ val }
+        DataValue::Int(val)
     }
 }
 
-impl From<String> for DataValue{
-    fn from(val: String) -> DataValue{
-        DataValue::String{ val }
+// hack around cycle caused by () impl'ing Into<String>
+pub trait ShouldDataValueFromString{}
+impl     ShouldDataValueFromString for String{}
+impl<'a> ShouldDataValueFromString for &'a str{}
+impl<S> From<S> for DataValue where S: Into<String> + ShouldDataValueFromString{
+    fn from(val: S) -> DataValue{
+        DataValue::String(val.into())
     }
 }
 
@@ -280,15 +292,13 @@ impl From<Rc<RefCell<Graph>>> for DataValue{
     fn from(val: Rc<RefCell<Graph>>) -> Self{
         let v = val.clone();
         let v = v.borrow();
-        DataValue::Graph{ val: v.data.clone() }
+        DataValue::Graph(v.data.clone())
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag="type")]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Response{
     Ok,
     Warn(DataValue),
     Err(DataValue)
 }
-
